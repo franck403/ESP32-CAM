@@ -38,6 +38,11 @@
   #unsupported{display:none;background:#3a1f1f;border:1px solid #6a2c2c;color:#f0b4b4;
       border-radius:6px;padding:10px 12px;font-size:13px;margin-bottom:16px}
   ol{font-size:14px;line-height:1.6;color:#bcc;margin:0 0 10px;padding-left:20px}
+  .hint{font-size:12px;color:#899;margin:0}
+  .sep{border:0;border-top:1px solid #2a2a2a;margin:14px 0}
+  .toggle{display:flex;flex-direction:row;align-items:center;gap:6px;
+          font-size:13px;color:#bcc}
+  .toggle input{width:auto}
 </style>
 </head>
 <body>
@@ -56,11 +61,33 @@
       <summary>Use a local file instead</summary>
       <p style="margin-top:8px"><input type="file" id="file" accept=".py"></p>
     </details>
+
+    <hr class="sep">
+
+    <h2 style="font-size:14px">WiFi &mdash; STA (join your router)</h2>
+    <p class="hint">Optional. Leave empty to keep the network already saved on the board.</p>
     <div class="row">
-      <label>WiFi name (optional)<input type="text" id="ssid" autocomplete="off"></label>
+      <label>WiFi name<input type="text" id="ssid" autocomplete="off"></label>
       <label>WiFi password<input type="password" id="pw" autocomplete="off"></label>
     </div>
-    <p style="font-size:12px;color:#899">Leave the WiFi fields empty to keep the network already saved on the board.</p>
+
+    <hr class="sep">
+
+    <h2 style="font-size:14px">WiFi &mdash; AP (camera makes its own hotspot)</h2>
+    <p class="hint">Runs alongside STA. Browse to <code>http://192.168.4.1/</code> after joining.</p>
+    <div class="row">
+      <label class="toggle">
+        <input type="checkbox" id="apEnable" checked>
+        Enable AP at boot
+      </label>
+    </div>
+    <div class="row">
+      <label>AP SSID<input type="text" id="apSsid" value="ESP32-CAM" autocomplete="off"></label>
+      <label>AP password (min 8 chars, or blank = open)<input type="password" id="apPw" value="12345678" autocomplete="off"></label>
+    </div>
+
+    <hr class="sep">
+
     <div class="row">
       <button id="install" class="primary">Install main.py</button>
       <progress id="prog" value="0" max="100" hidden></progress>
@@ -225,6 +252,14 @@
     return btoa(s);
   }
 
+  // Write arbitrary JSON to a file on the board (used for wifi.json / ap.json).
+  async function writeJson(name, obj) {
+    var json = JSON.stringify(obj);
+    await rawExec(
+      "open('" + name + "', 'w').write(binascii.a2b_base64('" +
+      b64(enc.encode(json)) + "').decode())");
+  }
+
   // ---- install ------------------------------------------------------------
   async function install() {
     $('log').textContent = '';
@@ -234,6 +269,20 @@
 
     var ssid = $('ssid').value.trim();
     var pw = $('pw').value;
+
+    var apEnable = $('apEnable').checked;
+    var apSsid = $('apSsid').value.trim();
+    var apPw = $('apPw').value;
+
+    if (apEnable && !apSsid) {
+      log('AP SSID is empty. Either fill it in or uncheck "Enable AP at boot".');
+      return;
+    }
+    if (apEnable && apPw && apPw.length < 8) {
+      log('AP password must be at least 8 characters (leave blank for an open network).');
+      return;
+    }
+
     var btn = $('install'), prog = $('prog');
     btn.disabled = true;
     prog.hidden = false;
@@ -274,11 +323,26 @@
       if (size !== total) throw new Error('size check failed: board has ' + size + ' bytes, expected ' + total);
       log('main.py written (' + size + ' bytes, verified).');
 
+      // ---- STA credentials -------------------------------------------------
       if (ssid) {
-        var json = JSON.stringify({ ssid: ssid, password: pw });
-        await rawExec("open('wifi.json', 'w').write(binascii.a2b_base64('" +
-                      b64(enc.encode(json)) + "').decode())");
-        log('WiFi "' + ssid + '" saved on the board.');
+        await writeJson('wifi.json', { ssid: ssid, password: pw });
+        log('WiFi STA "' + ssid + '" saved to wifi.json.');
+      } else {
+        log('No STA credentials given: existing wifi.json (or config.py) kept.');
+      }
+
+      // ---- AP credentials --------------------------------------------------
+      if (apEnable) {
+        await writeJson('ap.json', { ssid: apSsid, password: apPw });
+        log('AP "' + apSsid + '" saved to ap.json' +
+            (apPw ? '' : ' (open network)') + '.');
+      } else {
+        // Remove ap.json and force AP_AUTO = False at boot so no AP is started.
+        await rawExec(
+          "try:\n os.remove('ap.json')\nexcept OSError:\n pass\n" +
+          "print('ap.json cleared')");
+        log('AP disabled in installer: ap.json removed. ' +
+            'The AP will not start unless you toggle it on the board (or edit AP_AUTO in main.py).');
       }
 
       await write('\x02');                  // leave raw REPL
@@ -286,7 +350,11 @@
       await write('\x04');                  // soft reboot: runs the new main.py
       await sleep(600);
       prog.value = 100;
-      log('Done. The board is restarting: wait about 5 seconds, then open the USB viewer.');
+
+      var addr = apEnable ? '192.168.4.1 (AP)' : '';
+      if (ssid) addr += (addr ? ' / ' : '') + 'the board\'s LAN IP (STA)';
+      log('Done. The board is restarting: wait about 5 seconds.');
+      if (addr) log('Open the stream at http://' + addr + ' or use the USB viewer.');
       $('viewer').classList.add('good');
     } catch (e) {
       log('FAILED: ' + e.message);
