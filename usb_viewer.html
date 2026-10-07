@@ -61,9 +61,7 @@
     } catch (e) {}
   }
   killBadge();
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', killBadge);
-  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', killBadge);
   window.addEventListener('load', killBadge);
   var mo = new MutationObserver(killBadge);
   mo.observe(document.documentElement, { childList: true, subtree: true });
@@ -76,7 +74,6 @@
   <div class="bar">
     <button id="connect">Connect</button>
     <button id="disconnect" disabled>Disconnect</button>
-    <!-- default 115200: matches the board's fallback when the fast UART fails -->
     <label>Baud <input id="baud" type="number" value="115200"></label>
     <label>Scale
       <select id="scale">
@@ -91,10 +88,8 @@
     <button id="snap">Snapshot</button>
     <button id="full">Fullscreen</button>
   </div>
-
   <div class="stage" id="stage"><canvas id="c" width="320" height="240"></canvas></div>
   <div id="status">Not connected</div>
-
   <details id="settings">
     <summary>Board settings (WiFi stream and USB)</summary>
     <div class="grid">
@@ -145,13 +140,10 @@
     <div id="board">-</div>
   </details>
 </div>
-
 <div id="toasts"></div>
-
 <script>
 (function () {
   'use strict';
-
   var $ = function (id) { return document.getElementById(id); };
 
   var canvas   = $('c');
@@ -167,17 +159,13 @@
   var MAX_JPEG = 2 * 1024 * 1024;
   var textEnc = new TextEncoder(), textDec = new TextDecoder();
 
-  /* ================================================================== */
-  /*  Toasts                                                            */
-  /* ================================================================== */
+  /* ==================== toasts ==================== */
   var lastToastKey = '', lastToastAt = 0;
-
   function toast(title, msg, kind) {
     msg = String(msg == null ? '' : msg);
     var key = title + '\u0000' + msg, now = Date.now();
     if (key === lastToastKey && now - lastToastAt < 3000) return;
     lastToastKey = key; lastToastAt = now;
-
     var d = document.createElement('div');
     d.className = 'toast' + (kind ? ' ' + kind : '');
     var t = document.createElement('span');
@@ -193,14 +181,11 @@
     }, kind === 'err' ? 9000 : 5500);
   }
 
-  /* ================================================================== */
-  /*  View                                                              */
-  /* ================================================================== */
+  /* ==================== view ==================== */
   function applyView() {
     canvas.style.imageRendering = smoothEl.checked ? 'auto' : 'pixelated';
     var cw = canvas.width || 1, ch = canvas.height || 1;
     var s = scaleEl.value;
-
     if (s === 'fit') {
       var r = stage.getBoundingClientRect();
       var availW = Math.max(32, r.width  - 4);
@@ -214,16 +199,13 @@
       canvas.style.height = (ch * k2) + 'px';
     }
   }
-
   scaleEl.addEventListener('change', applyView);
   smoothEl.addEventListener('change', applyView);
   window.addEventListener('resize', applyView);
   if (window.ResizeObserver) new ResizeObserver(applyView).observe(stage);
   document.addEventListener('fullscreenchange', function () { setTimeout(applyView, 0); });
 
-  $('full').addEventListener('click', function () {
-    if (canvas.requestFullscreen) canvas.requestFullscreen();
-  });
+  $('full').addEventListener('click', function () { if (canvas.requestFullscreen) canvas.requestFullscreen(); });
   $('snap').addEventListener('click', function () {
     canvas.toBlob(function (b) {
       if (!b) return;
@@ -235,26 +217,19 @@
     }, 'image/png');
   });
 
-  /* ================================================================== */
-  /*  Commands                                                          */
-  /* ================================================================== */
+  /* ==================== commands ==================== */
   async function send(obj) {
     if (!writer) return;
     try { await writer.write(textEnc.encode(JSON.stringify(obj) + '\n')); } catch (e) {}
   }
-
-  function enableSettings(on) {
-    settingBtns.forEach(function (id) { $(id).disabled = !on; });
-  }
+  function enableSettings(on) { settingBtns.forEach(function (id) { $(id).disabled = !on; }); }
 
   $('a_mode').addEventListener('click', function () { send({ cmd: 'mode', mode: $('s_mode').value }); });
   $('a_q').addEventListener('click', function () {
     var v = $('s_q').value;
     send({ cmd: 'quality', q: v === 'auto' ? 'auto' : parseInt(v, 10) });
   });
-  $('a_usbq').addEventListener('click', function () {
-    send({ cmd: 'usbq', q: parseInt($('s_usbq').value, 10) || 60 });
-  });
+  $('a_usbq').addEventListener('click', function () { send({ cmd: 'usbq', q: parseInt($('s_usbq').value, 10) || 60 }); });
   $('a_wifi').addEventListener('click', function () {
     var ssid = $('s_ssid').value.trim();
     if (!ssid) { boardEl.textContent = 'Enter a WiFi name first.'; return; }
@@ -265,17 +240,12 @@
   $('a_repl').addEventListener('click', async function () {
     await send({ cmd: 'repl' });
     setTimeout(function () {
-      disconnect().then(function () {
-        setStatus('Board is back on the normal REPL (115200 baud).');
-      });
+      disconnect().then(function () { setStatus('Board is back on the normal REPL (115200 baud).'); });
     }, 300);
   });
 
-  /* ================================================================== */
-  /*  Board JSON status                                                 */
-  /* ================================================================== */
+  /* ==================== board JSON status ==================== */
   var warnedNoJpeg = false;
-
   function onMsg(m) {
     if (!m || typeof m !== 'object') return;
     if (m.t === 'status') {
@@ -287,14 +257,11 @@
         '  |  WiFi JPEG: ' + (m.q === 'auto' ? 'auto' : 'fixed') + ', now ' + m.qlevel +
         '  |  USB JPEG ' + m.usbq + '  |  ' + wifi + '  |  link ' + m.baud + ' baud' +
         (m.jpeg ? '' : '  |  no jpeg module in this firmware');
-      if (document.activeElement !== $('s_ssid') && !$('s_ssid').value && m.ssid) {
-        $('s_ssid').value = m.ssid;
-      }
+      if (document.activeElement !== $('s_ssid') && !$('s_ssid').value && m.ssid) $('s_ssid').value = m.ssid;
       if (!m.jpeg && !warnedNoJpeg) {
         warnedNoJpeg = true;
         toast('No JPEG encoder on the board',
-              'This firmware has no "jpeg" module, so no frames can be sent over USB.',
-              'err');
+              'This firmware has no "jpeg" module, so no frames can be sent over USB.', 'err');
       }
     } else if (m.t === 'error') {
       boardEl.textContent = 'Board error: ' + m.msg;
@@ -302,9 +269,7 @@
     }
   }
 
-  /* ================================================================== */
-  /*  Parser                                                            */
-  /* ================================================================== */
+  /* ==================== parser ==================== */
   var buf  = new Uint8Array(1 << 16), blen = 0;
   var trash = new Uint8Array(8192), trashLen = 0, trashTimer = null;
 
@@ -312,11 +277,9 @@
   var frames = 0, bytes = 0, tStat = performance.now();
   var seq = 0, shown = 0, gotPacket = false, gotFrame = false, beat = null;
   var decodeFails = 0;
-  var lastDataTime = 0;
-  var pktCount = 0;
-
-  // dedupe of board text messages
+  var lastDataTime = 0, pktCount = 0;
   var seenTexts = Object.create(null);
+  var statsSeen = 0;
 
   function setStatus(t) { statusEl.textContent = t; }
 
@@ -329,14 +292,8 @@
     buf.set(chunk, blen);
     blen += chunk.length;
   }
+  function consume(n) { if (n <= 0) return; buf.copyWithin(0, n, blen); blen -= n; }
 
-  function consume(n) {
-    if (n <= 0) return;
-    buf.copyWithin(0, n, blen);
-    blen -= n;
-  }
-
-  /* ---- leftover bytes ------------------------------------------------ */
   function addTrash(start, n) {
     if (n <= 0) return;
     if (trashLen + n > trash.length) {
@@ -347,13 +304,14 @@
     }
     trash.set(buf.subarray(start, start + n), trashLen);
     trashLen += n;
-    if (!trashTimer) {
-      trashTimer = setTimeout(function () { trashTimer = null; flushTrash(); }, 400);
-    }
+    if (!trashTimer) trashTimer = setTimeout(function () { trashTimer = null; flushTrash(); }, 400);
   }
 
-  var lastTextToast = 0, textToastStreak = 0;
-  var warnedNoise = false;
+  var lastTextToast = 0, textToastStreak = 0, warnedNoise = false;
+
+  /* known periodic / boot lines that we never want as a toast */
+  var RE_STATS   = /^[A-Za-z0-9_]+:\s*[\d.]+\s*fps\s*\|\s*cap\s*\d+\s*enc\s*\d+\s*send\s*\d+\s*ms\s*\|\s*\d+\s*B\/frame\s*\|\s*level\s+[\w.]+\s*\|\s*rssi\s*-?\d+\s*dBm\s*$/;
+  var RE_BOOT    = /^(USB:|WiFi:|Camera init:|Frame:|Switching mode|Now:|Adopting real frame:|Stopped|Board )/;
 
   function flushTrash() {
     if (!trashLen) return;
@@ -369,32 +327,34 @@
     }
     if (printable < 4 || printable < n * 0.85) return;
     var txt = s.replace(/\s+/g, ' ').trim();
-    if (!txt) return;
+    if (!txt || !/[A-Za-z0-9]/.test(txt)) return;
 
-    // skip empty/whitespace
-    if (!/[A-Za-z0-9]/.test(txt)) return;
-
-    // classify
-    var bootLike = /^(USB:|WiFi:|Camera init:|Frame:|Switching|Now:|Adopting|Board |Stopped)/i.test(txt);
-    var errLike  = /(Error|error|failed|Failed|Traceback|Exception)/.test(txt);
-
-    // count replacement dots
-    var dots = 0;
-    for (var k = 0; k < txt.length; k++) if (txt.charAt(k) === '\u00b7') dots++;
-
-    // garbled = many non-printables or a very low alnum ratio or no vowels in a long run
-    var alnum = 0, vowels = 0;
-    for (var j = 0; j < txt.length; j++) {
-      var c = txt.charAt(j);
-      if (/[A-Za-z0-9]/.test(c)) {
-        alnum++;
-        if (/[aeiouAEIOU]/.test(c)) vowels++;
+    /* 1. periodic WiFi stats line: silently swallow, but track it, because
+          it is only printed by the board when usb_on is False.  If we keep
+          seeing it, USB streaming never engaged. */
+    if (RE_STATS.test(txt)) {
+      statsSeen++;
+      if (statsSeen === 3) {
+        toast('USB streaming not engaged',
+              'The board is printing its WiFi stats line to the serial console, ' +
+              'which means it never received the "usb on" command. Try Disconnect ' +
+              'then Connect again, and confirm the baud matches what the board ' +
+              'printed at boot (115200 if fast UART failed).',
+              'err');
       }
+      return;
+    }
+
+    /* 2. garbled UART data */
+    var dots = 0, alnum = 0, vowels = 0;
+    for (var k = 0; k < txt.length; k++) {
+      var c = txt.charAt(k);
+      if (c === '\u00b7') dots++;
+      if (/[A-Za-z0-9]/.test(c)) { alnum++; if (/[aeiouAEIOU]/.test(c)) vowels++; }
     }
     var garbled = (dots > txt.length * 0.10) ||
                   (txt.length >= 8 && alnum < txt.length * 0.35) ||
                   (alnum >= 12 && vowels === 0);
-
     if (garbled) {
       if (!warnedNoise) {
         warnedNoise = true;
@@ -406,42 +366,29 @@
       return;
     }
 
-    // dedupe identical board text within a session
+    /* 3. dedupe identical strings */
     if (seenTexts[txt]) return;
     seenTexts[txt] = true;
 
-    if (bootLike && !errLike) {
-      // boot/runtime message from the board, show once
-      toast('Board', txt, 'text');
-    } else {
-      // throttle non-boot text
-      var now = Date.now();
-      if (now - lastTextToast < 1500) textToastStreak++;
-      else textToastStreak = 0;
-      lastTextToast = now;
-      if (textToastStreak > 3) return;
-      toast('Board sent text (not an image)', txt, 'text');
-    }
+    /* 4. boot lines: keep, but only once */
+    if (RE_BOOT.test(txt)) { toast('Board', txt, 'text'); return; }
+
+    /* 5. other text: throttle */
+    var now = Date.now();
+    if (now - lastTextToast < 1500) textToastStreak++; else textToastStreak = 0;
+    lastTextToast = now;
+    if (textToastStreak > 3) return;
+    toast('Board sent text (not an image)', txt, 'text');
   }
 
-  function dropOne() {
-    addTrash(0, 1);
-    consume(1);
-  }
+  function dropOne() { addTrash(0, 1); consume(1); }
 
-  /* Give up waiting for the rest of a packet only when the serial link has
-     been silent for a while. This lets slow links (115200 baud, ~11 KB/s)
-     still deliver a full multi-KB JPEG without being cut in half. */
   function waitedTooLong() {
     if (!lastDataTime) return false;
-    if (performance.now() - lastDataTime > 6000) {
-      lastDataTime = performance.now();  // don't spam timeouts
-      return true;
-    }
+    if (performance.now() - lastDataTime > 6000) { lastDataTime = performance.now(); return true; }
     return false;
   }
 
-  /* ---- image --------------------------------------------------------- */
   function showJpeg(data) {
     var my = ++seq;
     createImageBitmap(new Blob([data], { type: 'image/jpeg' })).then(function (bmp) {
@@ -461,13 +408,11 @@
       decodeFails++;
       if (decodeFails === 1 || decodeFails % 120 === 0) {
         toast('JPEG decode failed',
-              (err && err.message ? err.message : String(err)) +
-              '  (' + decodeFails + ' frames)', 'err');
+              (err && err.message ? err.message : String(err)) + '  (' + decodeFails + ' frames)', 'err');
       }
     });
   }
 
-  /* ---- parser -------------------------------------------------------- */
   function parse() {
     for (;;) {
       var found = -1;
@@ -481,7 +426,6 @@
         return;
       }
       if (found > 0) { addTrash(0, found); consume(found); }
-
       if (blen < 8) return;
       var kind = buf[3];
       var len  = (buf[4] | (buf[5] << 8) | (buf[6] << 16)) + buf[7] * 16777216;
@@ -492,8 +436,7 @@
         if (blen < 8 + len) { if (waitedTooLong()) { dropOne(); continue; } return; }
         var txt = textDec.decode(buf.subarray(8, 8 + len));
         gotPacket = true; pktCount++;
-        try { onMsg(JSON.parse(txt)); }
-        catch (e) { toast('Board message', txt, 'text'); }
+        try { onMsg(JSON.parse(txt)); } catch (e) { toast('Board message', txt, 'text'); }
         consume(8 + len);
         continue;
       }
@@ -509,9 +452,7 @@
     }
   }
 
-  /* ================================================================== */
-  /*  Serial                                                            */
-  /* ================================================================== */
+  /* ==================== serial ==================== */
   async function readLoop() {
     while (running && port && port.readable) {
       reader = port.readable.getReader();
@@ -526,12 +467,8 @@
             parse();
           }
         }
-      } catch (e) {
-        setStatus('Read error: ' + e.message);
-      } finally {
-        try { reader.releaseLock(); } catch (e2) {}
-        reader = null;
-      }
+      } catch (e) { setStatus('Read error: ' + e.message); }
+      finally { try { reader.releaseLock(); } catch (e2) {} reader = null; }
     }
   }
 
@@ -557,7 +494,7 @@
     gotPacket = false; gotFrame = false; decodeFails = 0;
     pktCount = 0; seenTexts = Object.create(null);
     warnedNoise = false; warnedNoJpeg = false;
-    seq = 0; shown = 0;
+    statsSeen = 0; seq = 0; shown = 0;
     running = true;
     btnConnect.disabled = true;
     btnDisconnect.disabled = false;
@@ -565,18 +502,24 @@
     setStatus('Connected, waiting for the board...');
     toast('Connected', 'Waiting for the board to start streaming...', 'ok');
 
-    // space out the two initial commands: some boards lose bytes when they
-    // arrive in a single burst on a small RX buffer
-    send({ cmd: 'usb', on: true });
-    setTimeout(function () { if (running) send({ cmd: 'get' }); }, 400);
+    /* Belt and braces: repeat "usb on" a few times, spaced out, so it survives
+       the board's SAFE_S window (4 s of blocking sleeps at boot) and any byte
+       that is dropped on a slow link. */
+    (function retryUsb() {
+      if (!running) return;
+      send({ cmd: 'usb', on: true });
+    })();
+    var tries = [400, 1000, 2000, 4000];
+    tries.forEach(function (ms) {
+      setTimeout(function () { if (running) send({ cmd: 'usb', on: true }); }, ms);
+    });
+    setTimeout(function () { if (running) send({ cmd: 'get' }); }, 600);
     beat = setInterval(function () { if (running) send({ cmd: 'get' }); }, 2000);
 
     setTimeout(function () {
-      if (!running) return;
-      if (!gotPacket) {
-        setStatus('No data yet. Wait ~5 s after the board boots, and check that the baud ' +
-                  'in this viewer matches the board. If the board printed ' +
-                  '"fast UART failed ... staying at 115200", use 115200 here too.');
+      if (running && !gotPacket) {
+        setStatus('No data yet. Wait ~5 s after the board boots, and check that the ' +
+                  'baud here matches the board (115200 if it printed "fast UART failed").');
       }
     }, 5000);
 
@@ -594,7 +537,7 @@
     }
     try { if (reader) await reader.cancel(); } catch (e) {}
     try { if (loopDone) await loopDone; } catch (e) {}
-    try { if (writer) { writer.releaseLock(); } } catch (e) {}
+    try { if (writer) writer.releaseLock(); } catch (e) {}
     writer = null;
     try { if (port) await port.close(); } catch (e) {}
     port = null;
@@ -612,28 +555,21 @@
     });
   }
 
-  /* ================================================================== */
-  /*  Status line                                                       */
-  /* ================================================================== */
+  /* ==================== status line ==================== */
   setInterval(function () {
     if (!running) return;
     var now = performance.now();
     var dt = (now - tStat) / 1000;
     if (dt <= 0) return;
-
     if (gotFrame) {
       setStatus(canvas.width + 'x' + canvas.height + '  ' +
                 (frames / dt).toFixed(1) + ' fps  ' +
                 (bytes / 1024 / dt).toFixed(0) + ' KB/s');
     } else if (bytes > 0) {
-      // data is flowing but no complete frame yet
       var kb = (bytes / 1024 / dt).toFixed(0);
-      var extra = pktCount > 0
-        ? '  (' + pktCount + ' packets, no frames)'
-        : '  (no valid packets yet)';
+      var extra = pktCount > 0 ? '  (' + pktCount + ' packets, no frames)' : '  (no valid packets yet)';
       setStatus('Receiving data at ' + kb + ' KB/s' + extra);
     }
-
     frames = 0; bytes = 0; tStat = now;
   }, 1000);
 
