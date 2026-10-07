@@ -50,13 +50,44 @@
   .toast.fade{opacity:0;transition:opacity .3s}
   @keyframes tin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 </style>
+<script>
+/* Kill the Netlify "hud" badge as early as possible: it is injected by
+   Netlify's snippet and has id="nl-badge-frame". We remove it on sight and
+   keep watching in case Netlify re-adds it. */
+(function () {
+  function killBadge() {
+    try {
+      var el = document.getElementById('nl-badge-frame');
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+      // belt and braces: any netlify iframe
+      var ifs = document.querySelectorAll('iframe[src*="/.netlify/"], iframe[src*="netlify"]');
+      for (var i = 0; i < ifs.length; i++) {
+        if (ifs[i].id === 'nl-badge-frame' || /\.netlify\//.test(ifs[i].src)) {
+          if (ifs[i].parentNode) ifs[i].parentNode.removeChild(ifs[i]);
+        }
+      }
+    } catch (e) {}
+  }
+  killBadge();
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', killBadge);
+  }
+  window.addEventListener('load', killBadge);
+  // keep removing if Netlify injects it later
+  var mo = new MutationObserver(killBadge);
+  mo.observe(document.documentElement, { childList: true, subtree: true });
+  // no need to watch forever
+  setTimeout(function () { try { mo.disconnect(); } catch (e) {} }, 30000);
+})();
+</script>
 </head>
 <body>
 <div class="wrap">
   <div class="bar">
     <button id="connect">Connect</button>
     <button id="disconnect" disabled>Disconnect</button>
-    <label>Baud <input id="baud" type="number" value="921600"></label>
+    <!-- default 115200: most CH340 links stay here, faster needs a matching board -->
+    <label>Baud <input id="baud" type="number" value="115200"></label>
     <label>Scale
       <select id="scale">
         <option value="fit">Fit window</option>
@@ -333,6 +364,29 @@
     }
   }
 
+  /* Does this look like garbled UART data (wrong baud) rather than a real
+     message from the board?  We reject anything with too many replacement
+     dots, too many non-letter/symbol chars in a row, or an implausible
+     ratio of vowels. */
+  var lastTextToast = 0, textToastStreak = 0;
+
+  function looksLikeUartNoise(txt) {
+    if (txt.length < 2) return true;
+    var dots = 0, alnum = 0, vowels = 0;
+    for (var i = 0; i < txt.length; i++) {
+      var c = txt.charAt(i);
+      if (c === '\u00b7') dots++;
+      if (/[A-Za-z0-9]/.test(c)) {
+        alnum++;
+        if (/[aeiouAEIOU]/.test(c)) vowels++;
+      }
+    }
+    if (dots > txt.length * 0.10) return true;                 // many non-printables
+    if (txt.length >= 8 && alnum < txt.length * 0.35) return true; // mostly symbols
+    if (alnum >= 12 && vowels === 0) return true;              // no vowels at all
+    return false;
+  }
+
   function flushTrash() {
     if (!trashLen) return;
     var n = trashLen;
@@ -345,10 +399,33 @@
       else if (b >= 33 && b < 127) { printable++; s += String.fromCharCode(b); }
       else { s += '\u00b7'; }
     }
-    // only report it when it really is text, not binary noise
+    // only consider it text when it really is printable
     if (printable < 4 || printable < n * 0.9) return;
     var txt = s.replace(/\s+/g, ' ').trim();
-    if (txt) toast('Board sent text (not an image)', txt, 'text');
+    if (!txt) return;
+
+    // suppress UART noise (wrong baud = garbled text)
+    if (looksLikeUartNoise(txt)) {
+      // Show one hint, then stay quiet while noise keeps flowing
+      var now = Date.now();
+      if (now - lastTextToast > 10000) {
+        lastTextToast = now;
+        toast('Ignoring UART noise',
+              'The board looks like it is talking at a different baud rate. ' +
+              'Try 115200, or match the value the board printed at boot.',
+              'text');
+      }
+      return;
+    }
+
+    // rate-limit non-noise text toasts so a chatty board can't flood the UI
+    var now2 = Date.now();
+    if (now2 - lastTextToast < 1500) textToastStreak++;
+    else textToastStreak = 0;
+    lastTextToast = now2;
+    if (textToastStreak > 3) return;
+
+    toast('Board sent text (not an image)', txt, 'text');
   }
 
   function dropOne() {
@@ -472,7 +549,7 @@
     }
     try {
       port = await navigator.serial.requestPort();
-      await port.open({ baudRate: parseInt(baudEl.value, 10) || 921600, bufferSize: 1 << 18 });
+      await port.open({ baudRate: parseInt(baudEl.value, 10) || 115200, bufferSize: 1 << 18 });
       try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (e) {}
       writer = port.writable.getWriter();
     } catch (e) {
@@ -499,7 +576,7 @@
     setTimeout(function () {
       if (running && !gotPacket) {
         setStatus('No data yet. Wait ~5 s after the board boots, and check the baud ' +
-                  '(921600, or 115200 if the board printed that fast mode failed).');
+                  '(115200, or match the value the board printed at boot).');
       }
     }, 3500);
 
