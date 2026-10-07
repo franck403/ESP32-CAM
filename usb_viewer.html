@@ -17,14 +17,11 @@
   input[type=text],input[type=password]{width:150px}
   button{cursor:pointer}
   button:disabled{opacity:.4;cursor:default}
-
-  /* the canvas is sized by JS, the stage just gives it room */
   .stage{flex:1 1 0;min-height:140px;display:flex;align-items:center;
          justify-content:center;overflow:hidden}
   canvas{display:block;background:#000;border:1px solid #333;border-radius:6px}
   canvas:fullscreen{width:100vw !important;height:100vh !important;
                     border:0;border-radius:0;object-fit:contain}
-
   #status{font-size:13px;color:#9aa;text-align:center}
   details{font-size:13px;color:#9aa;background:#181818;border:1px solid #2a2a2a;
           border-radius:6px;padding:8px 12px}
@@ -32,8 +29,6 @@
   .grid{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;margin:10px 0}
   .grp{display:flex;gap:8px;align-items:center}
   #board{margin-top:6px;color:#8c9;line-height:1.5}
-
-  /* ---- toasts -------------------------------------------------------- */
   #toasts{position:fixed;right:14px;bottom:14px;z-index:9999;
           display:flex;flex-direction:column;gap:8px;align-items:flex-end;
           max-width:min(440px,86vw);pointer-events:none}
@@ -51,15 +46,12 @@
   @keyframes tin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 </style>
 <script>
-/* Kill the Netlify "hud" badge as early as possible: it is injected by
-   Netlify's snippet and has id="nl-badge-frame". We remove it on sight and
-   keep watching in case Netlify re-adds it. */
+/* Kill the Netlify "hud" badge as early as possible. */
 (function () {
   function killBadge() {
     try {
       var el = document.getElementById('nl-badge-frame');
       if (el && el.parentNode) el.parentNode.removeChild(el);
-      // belt and braces: any netlify iframe
       var ifs = document.querySelectorAll('iframe[src*="/.netlify/"], iframe[src*="netlify"]');
       for (var i = 0; i < ifs.length; i++) {
         if (ifs[i].id === 'nl-badge-frame' || /\.netlify\//.test(ifs[i].src)) {
@@ -73,10 +65,8 @@
     document.addEventListener('DOMContentLoaded', killBadge);
   }
   window.addEventListener('load', killBadge);
-  // keep removing if Netlify injects it later
   var mo = new MutationObserver(killBadge);
   mo.observe(document.documentElement, { childList: true, subtree: true });
-  // no need to watch forever
   setTimeout(function () { try { mo.disconnect(); } catch (e) {} }, 30000);
 })();
 </script>
@@ -86,7 +76,7 @@
   <div class="bar">
     <button id="connect">Connect</button>
     <button id="disconnect" disabled>Disconnect</button>
-    <!-- default 115200: most CH340 links stay here, faster needs a matching board -->
+    <!-- default 115200: matches the board's fallback when the fast UART fails -->
     <label>Baud <input id="baud" type="number" value="115200"></label>
     <label>Scale
       <select id="scale">
@@ -185,7 +175,7 @@
   function toast(title, msg, kind) {
     msg = String(msg == null ? '' : msg);
     var key = title + '\u0000' + msg, now = Date.now();
-    if (key === lastToastKey && now - lastToastAt < 2500) return;   // de-duplicate
+    if (key === lastToastKey && now - lastToastAt < 3000) return;
     lastToastKey = key; lastToastAt = now;
 
     var d = document.createElement('div');
@@ -200,11 +190,11 @@
     setTimeout(function () {
       d.classList.add('fade');
       setTimeout(function () { if (d.parentNode) d.parentNode.removeChild(d); }, 350);
-    }, kind === 'err' ? 8000 : 5000);
+    }, kind === 'err' ? 9000 : 5500);
   }
 
   /* ================================================================== */
-  /*  View — everything is scaled here in the browser                   */
+  /*  View                                                              */
   /* ================================================================== */
   function applyView() {
     canvas.style.imageRendering = smoothEl.checked ? 'auto' : 'pixelated';
@@ -246,7 +236,7 @@
   });
 
   /* ================================================================== */
-  /*  Commands to the board                                             */
+  /*  Commands                                                          */
   /* ================================================================== */
   async function send(obj) {
     if (!writer) return;
@@ -282,13 +272,12 @@
   });
 
   /* ================================================================== */
-  /*  Board status messages                                             */
+  /*  Board JSON status                                                 */
   /* ================================================================== */
   var warnedNoJpeg = false;
 
   function onMsg(m) {
     if (!m || typeof m !== 'object') return;
-
     if (m.t === 'status') {
       var wifi = m.wifi
         ? ('WiFi ' + m.ssid + '  http://' + m.ip + '  ' + m.rssi + ' dBm')
@@ -314,20 +303,20 @@
   }
 
   /* ================================================================== */
-  /*  Serial framing                                                    */
-  /*    A5 5A C3 3C | len u32 LE | JPEG                                 */
-  /*    A5 5A C3 3D | len u32 LE | JSON text                            */
-  /*  Anything else is collected and, when it is readable text, shown   */
-  /*  in a toast ("the board sent a string, not an image").             */
+  /*  Parser                                                            */
   /* ================================================================== */
   var buf  = new Uint8Array(1 << 16), blen = 0;
-  var trash = new Uint8Array(4096), trashLen = 0, trashTimer = null;
-  var waitStart = 0;
+  var trash = new Uint8Array(8192), trashLen = 0, trashTimer = null;
 
   var port = null, reader = null, writer = null, running = false, loopDone = null;
   var frames = 0, bytes = 0, tStat = performance.now();
   var seq = 0, shown = 0, gotPacket = false, gotFrame = false, beat = null;
   var decodeFails = 0;
+  var lastDataTime = 0;
+  var pktCount = 0;
+
+  // dedupe of board text messages
+  var seenTexts = Object.create(null);
 
   function setStatus(t) { statusEl.textContent = t; }
 
@@ -345,14 +334,13 @@
     if (n <= 0) return;
     buf.copyWithin(0, n, blen);
     blen -= n;
-    waitStart = 0;
   }
 
-  /* ---- leftover bytes: text from the board --------------------------- */
+  /* ---- leftover bytes ------------------------------------------------ */
   function addTrash(start, n) {
     if (n <= 0) return;
     if (trashLen + n > trash.length) {
-      var keep = Math.min(trashLen, 1024);
+      var keep = Math.min(trashLen, 2048);
       trash.copyWithin(0, trashLen - keep, trashLen);
       trashLen = keep;
       if (trashLen + n > trash.length) n = trash.length - trashLen;
@@ -360,32 +348,12 @@
     trash.set(buf.subarray(start, start + n), trashLen);
     trashLen += n;
     if (!trashTimer) {
-      trashTimer = setTimeout(function () { trashTimer = null; flushTrash(); }, 350);
+      trashTimer = setTimeout(function () { trashTimer = null; flushTrash(); }, 400);
     }
   }
 
-  /* Does this look like garbled UART data (wrong baud) rather than a real
-     message from the board?  We reject anything with too many replacement
-     dots, too many non-letter/symbol chars in a row, or an implausible
-     ratio of vowels. */
   var lastTextToast = 0, textToastStreak = 0;
-
-  function looksLikeUartNoise(txt) {
-    if (txt.length < 2) return true;
-    var dots = 0, alnum = 0, vowels = 0;
-    for (var i = 0; i < txt.length; i++) {
-      var c = txt.charAt(i);
-      if (c === '\u00b7') dots++;
-      if (/[A-Za-z0-9]/.test(c)) {
-        alnum++;
-        if (/[aeiouAEIOU]/.test(c)) vowels++;
-      }
-    }
-    if (dots > txt.length * 0.10) return true;                 // many non-printables
-    if (txt.length >= 8 && alnum < txt.length * 0.35) return true; // mostly symbols
-    if (alnum >= 12 && vowels === 0) return true;              // no vowels at all
-    return false;
-  }
+  var warnedNoise = false;
 
   function flushTrash() {
     if (!trashLen) return;
@@ -399,33 +367,61 @@
       else if (b >= 33 && b < 127) { printable++; s += String.fromCharCode(b); }
       else { s += '\u00b7'; }
     }
-    // only consider it text when it really is printable
-    if (printable < 4 || printable < n * 0.9) return;
+    if (printable < 4 || printable < n * 0.85) return;
     var txt = s.replace(/\s+/g, ' ').trim();
     if (!txt) return;
 
-    // suppress UART noise (wrong baud = garbled text)
-    if (looksLikeUartNoise(txt)) {
-      // Show one hint, then stay quiet while noise keeps flowing
-      var now = Date.now();
-      if (now - lastTextToast > 10000) {
-        lastTextToast = now;
-        toast('Ignoring UART noise',
-              'The board looks like it is talking at a different baud rate. ' +
-              'Try 115200, or match the value the board printed at boot.',
+    // skip empty/whitespace
+    if (!/[A-Za-z0-9]/.test(txt)) return;
+
+    // classify
+    var bootLike = /^(USB:|WiFi:|Camera init:|Frame:|Switching|Now:|Adopting|Board |Stopped)/i.test(txt);
+    var errLike  = /(Error|error|failed|Failed|Traceback|Exception)/.test(txt);
+
+    // count replacement dots
+    var dots = 0;
+    for (var k = 0; k < txt.length; k++) if (txt.charAt(k) === '\u00b7') dots++;
+
+    // garbled = many non-printables or a very low alnum ratio or no vowels in a long run
+    var alnum = 0, vowels = 0;
+    for (var j = 0; j < txt.length; j++) {
+      var c = txt.charAt(j);
+      if (/[A-Za-z0-9]/.test(c)) {
+        alnum++;
+        if (/[aeiouAEIOU]/.test(c)) vowels++;
+      }
+    }
+    var garbled = (dots > txt.length * 0.10) ||
+                  (txt.length >= 8 && alnum < txt.length * 0.35) ||
+                  (alnum >= 12 && vowels === 0);
+
+    if (garbled) {
+      if (!warnedNoise) {
+        warnedNoise = true;
+        toast('Ignoring garbled UART data',
+              'The board appears to be sending data at a different baud rate ' +
+              'than the viewer. Try matching the value the board printed at boot.',
               'text');
       }
       return;
     }
 
-    // rate-limit non-noise text toasts so a chatty board can't flood the UI
-    var now2 = Date.now();
-    if (now2 - lastTextToast < 1500) textToastStreak++;
-    else textToastStreak = 0;
-    lastTextToast = now2;
-    if (textToastStreak > 3) return;
+    // dedupe identical board text within a session
+    if (seenTexts[txt]) return;
+    seenTexts[txt] = true;
 
-    toast('Board sent text (not an image)', txt, 'text');
+    if (bootLike && !errLike) {
+      // boot/runtime message from the board, show once
+      toast('Board', txt, 'text');
+    } else {
+      // throttle non-boot text
+      var now = Date.now();
+      if (now - lastTextToast < 1500) textToastStreak++;
+      else textToastStreak = 0;
+      lastTextToast = now;
+      if (textToastStreak > 3) return;
+      toast('Board sent text (not an image)', txt, 'text');
+    }
   }
 
   function dropOne() {
@@ -433,12 +429,15 @@
     consume(1);
   }
 
-  /* while waiting for the rest of a packet, give up after a while so a
-     false sync word can never wedge the parser forever */
+  /* Give up waiting for the rest of a packet only when the serial link has
+     been silent for a while. This lets slow links (115200 baud, ~11 KB/s)
+     still deliver a full multi-KB JPEG without being cut in half. */
   function waitedTooLong() {
-    var now = performance.now();
-    if (!waitStart) { waitStart = now; return false; }
-    if (now - waitStart > 1500) { waitStart = 0; return true; }
+    if (!lastDataTime) return false;
+    if (performance.now() - lastDataTime > 6000) {
+      lastDataTime = performance.now();  // don't spam timeouts
+      return true;
+    }
     return false;
   }
 
@@ -446,7 +445,7 @@
   function showJpeg(data) {
     var my = ++seq;
     createImageBitmap(new Blob([data], { type: 'image/jpeg' })).then(function (bmp) {
-      if (my > shown) {                       // never draw an older frame over a newer one
+      if (my > shown) {
         shown = my;
         if (bmp.width !== canvas.width || bmp.height !== canvas.height) {
           canvas.width  = bmp.width;
@@ -460,7 +459,7 @@
       bmp.close();
     }, function (err) {
       decodeFails++;
-      if (decodeFails === 1 || decodeFails % 60 === 0) {
+      if (decodeFails === 1 || decodeFails % 120 === 0) {
         toast('JPEG decode failed',
               (err && err.message ? err.message : String(err)) +
               '  (' + decodeFails + ' frames)', 'err');
@@ -471,53 +470,47 @@
   /* ---- parser -------------------------------------------------------- */
   function parse() {
     for (;;) {
-      /* 1. find the 4-byte sync word (0xA5 0x5A 0xC3 0x3C/0x3D) */
       var found = -1;
       for (var i = 0; i + 4 <= blen; i++) {
         if (buf[i] === 0xA5 && buf[i + 1] === 0x5A && buf[i + 2] === 0xC3 &&
             (buf[i + 3] === 0x3C || buf[i + 3] === 0x3D)) { found = i; break; }
       }
       if (found < 0) {
-        var keep = 3;                          // magic might be split across reads
+        var keep = 3;
         if (blen > keep) { addTrash(0, blen - keep); consume(blen - keep); }
         return;
       }
       if (found > 0) { addTrash(0, found); consume(found); }
 
-      /* 2. header */
       if (blen < 8) return;
       var kind = buf[3];
       var len  = (buf[4] | (buf[5] << 8) | (buf[6] << 16)) + buf[7] * 16777216;
+      if (!(len >= 0)) { dropOne(); continue; }
 
-      /* 3a. JSON status message */
       if (kind === 0x3D) {
         if (len < 2 || len > 8192) { dropOne(); continue; }
         if (blen < 8 + len) { if (waitedTooLong()) { dropOne(); continue; } return; }
         var txt = textDec.decode(buf.subarray(8, 8 + len));
-        gotPacket = true;
+        gotPacket = true; pktCount++;
         try { onMsg(JSON.parse(txt)); }
         catch (e) { toast('Board message', txt, 'text'); }
         consume(8 + len);
         continue;
       }
 
-      /* 3b. JPEG frame */
       if (len < 4 || len > MAX_JPEG) { dropOne(); continue; }
       if (blen < 10) return;
-      if (buf[8] !== 0xFF || buf[9] !== 0xD8) { dropOne(); continue; }   // no SOI
+      if (buf[8] !== 0xFF || buf[9] !== 0xD8) { dropOne(); continue; }
       if (blen < 8 + len) { if (waitedTooLong()) { dropOne(); continue; } return; }
-      if (buf[8 + len - 2] !== 0xFF || buf[8 + len - 1] !== 0xD9) {      // no EOI
-        dropOne();
-        continue;
-      }
-      gotPacket = true;
-      showJpeg(buf.slice(8, 8 + len));         // slice() copies
+      if (buf[8 + len - 2] !== 0xFF || buf[8 + len - 1] !== 0xD9) { dropOne(); continue; }
+      gotPacket = true; pktCount++;
+      showJpeg(buf.slice(8, 8 + len));
       consume(8 + len);
     }
   }
 
   /* ================================================================== */
-  /*  Serial port                                                       */
+  /*  Serial                                                            */
   /* ================================================================== */
   async function readLoop() {
     while (running && port && port.readable) {
@@ -528,12 +521,13 @@
           if (r.done) break;
           if (r.value && r.value.length) {
             bytes += r.value.length;
+            lastDataTime = performance.now();
             append(r.value);
             parse();
           }
         }
       } catch (e) {
-        setStatus('Read error: ' + e.message);   // non-fatal: the loop re-opens the reader
+        setStatus('Read error: ' + e.message);
       } finally {
         try { reader.releaseLock(); } catch (e2) {}
         reader = null;
@@ -558,9 +552,11 @@
       return;
     }
 
-    blen = 0; trashLen = 0; waitStart = 0;
+    blen = 0; trashLen = 0; lastDataTime = 0;
     frames = 0; bytes = 0; tStat = performance.now();
     gotPacket = false; gotFrame = false; decodeFails = 0;
+    pktCount = 0; seenTexts = Object.create(null);
+    warnedNoise = false; warnedNoJpeg = false;
     seq = 0; shown = 0;
     running = true;
     btnConnect.disabled = true;
@@ -569,16 +565,20 @@
     setStatus('Connected, waiting for the board...');
     toast('Connected', 'Waiting for the board to start streaming...', 'ok');
 
+    // space out the two initial commands: some boards lose bytes when they
+    // arrive in a single burst on a small RX buffer
     send({ cmd: 'usb', on: true });
-    send({ cmd: 'get' });
-    beat = setInterval(function () { send({ cmd: 'get' }); }, 2000);   // keeps USB streaming alive
+    setTimeout(function () { if (running) send({ cmd: 'get' }); }, 400);
+    beat = setInterval(function () { if (running) send({ cmd: 'get' }); }, 2000);
 
     setTimeout(function () {
-      if (running && !gotPacket) {
-        setStatus('No data yet. Wait ~5 s after the board boots, and check the baud ' +
-                  '(115200, or match the value the board printed at boot).');
+      if (!running) return;
+      if (!gotPacket) {
+        setStatus('No data yet. Wait ~5 s after the board boots, and check that the baud ' +
+                  'in this viewer matches the board. If the board printed ' +
+                  '"fast UART failed ... staying at 115200", use 115200 here too.');
       }
-    }, 3500);
+    }, 5000);
 
     loopDone = readLoop();
     await loopDone;
@@ -613,16 +613,27 @@
   }
 
   /* ================================================================== */
-  /*  Stats                                                             */
+  /*  Status line                                                       */
   /* ================================================================== */
   setInterval(function () {
-    if (!running || !gotFrame) return;
+    if (!running) return;
     var now = performance.now();
     var dt = (now - tStat) / 1000;
     if (dt <= 0) return;
-    setStatus(canvas.width + 'x' + canvas.height + '  ' +
-              (frames / dt).toFixed(1) + ' fps  ' +
-              (bytes / 1024 / dt).toFixed(0) + ' KB/s');
+
+    if (gotFrame) {
+      setStatus(canvas.width + 'x' + canvas.height + '  ' +
+                (frames / dt).toFixed(1) + ' fps  ' +
+                (bytes / 1024 / dt).toFixed(0) + ' KB/s');
+    } else if (bytes > 0) {
+      // data is flowing but no complete frame yet
+      var kb = (bytes / 1024 / dt).toFixed(0);
+      var extra = pktCount > 0
+        ? '  (' + pktCount + ' packets, no frames)'
+        : '  (no valid packets yet)';
+      setStatus('Receiving data at ' + kb + ' KB/s' + extra);
+    }
+
     frames = 0; bytes = 0; tStat = now;
   }, 1000);
 
