@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 Camera Installer</title>
+<style>
+  :root{color-scheme:dark}
+  html,body{margin:0;background:#111;color:#eee;font-family:system-ui,Arial,sans-serif}
+  .page{max-width:760px;margin:0 auto;padding:24px 16px 60px}
+  h1{font-size:22px;margin:0 0 4px}
+  h2{font-size:16px;margin:0 0 8px}
+  .sub{color:#9aa;margin:0 0 20px;font-size:14px}
+  .card{background:#181818;border:1px solid #2a2a2a;border-radius:8px;padding:16px;margin-bottom:16px}
+  p{font-size:14px;line-height:1.5;color:#bcc;margin:0 0 10px}
+  code{background:#222;border-radius:4px;padding:1px 5px;font-size:13px}
+  .row{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin:10px 0}
+  label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:#9aa}
+  input[type=text],input[type=password]{background:#222;color:#eee;border:1px solid #444;
+        border-radius:4px;padding:7px 10px;font-size:14px;width:200px}
+  button,.btn{background:#2a2a2a;color:#eee;border:1px solid #444;border-radius:6px;
+        padding:9px 16px;font-size:14px;cursor:pointer;text-decoration:none;display:inline-block}
+  button:hover,.btn:hover{background:#333}
+  button:disabled{opacity:.4;cursor:default}
+  .primary{background:#1d5fd1;border-color:#2b74ea}
+  .primary:hover{background:#2368e0}
+  .good{background:#1a7f3c;border-color:#23a14d}
+  .good:hover{background:#1f9247}
+  progress{width:200px;height:10px}
+  #src{font-size:13px;margin-bottom:8px}
+  #src.ok{color:#7fd48f}
+  #src.warn{color:#e8b25c}
+  details{font-size:13px;color:#9aa;margin:8px 0}
+  summary{cursor:pointer}
+  pre{background:#0c0c0c;border:1px solid #2a2a2a;border-radius:6px;padding:10px;
+      font-size:12px;line-height:1.5;max-height:220px;overflow:auto;white-space:pre-wrap;
+      margin:10px 0 0;min-height:20px;color:#bcd}
+  #unsupported{display:none;background:#3a1f1f;border:1px solid #6a2c2c;color:#f0b4b4;
+      border-radius:6px;padding:10px 12px;font-size:13px;margin-bottom:16px}
+  ol{font-size:14px;line-height:1.6;color:#bcc;margin:0 0 10px;padding-left:20px}
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>ESP32 Camera</h1>
+  <p class="sub">Install the camera script over USB, then open the USB viewer.</p>
+
+  <div id="unsupported">This browser has no Web Serial. Use Chrome or Edge on a PC.</div>
+
+  <section class="card">
+    <h2>1. Install</h2>
+    <p>Fetches <code>main.py</code> from this site and writes it to the board over USB
+       at 115200 baud. Close Thonny or any serial monitor first.</p>
+    <div id="src">Checking main.py...</div>
+    <details id="local">
+      <summary>Use a local file instead</summary>
+      <p style="margin-top:8px"><input type="file" id="file" accept=".py"></p>
+    </details>
+    <div class="row">
+      <label>WiFi name (optional)<input type="text" id="ssid" autocomplete="off"></label>
+      <label>WiFi password<input type="password" id="pw" autocomplete="off"></label>
+    </div>
+    <p style="font-size:12px;color:#899">Leave the WiFi fields empty to keep the network already saved on the board.</p>
+    <div class="row">
+      <button id="install" class="primary">Install main.py</button>
+      <progress id="prog" value="0" max="100" hidden></progress>
+    </div>
+    <pre id="log"></pre>
+  </section>
+
+  <section class="card">
+    <h2>2. USB viewer</h2>
+    <ol>
+      <li>After installing, the board restarts. Wait about 5 seconds.</li>
+      <li>Open the viewer and press Connect (it uses 921600 baud).</li>
+      <li>To install again later, press <b>Exit to REPL</b> in the viewer first, or press the board's RESET button right after pressing Install.</li>
+    </ol>
+    <a class="btn" id="viewer" href="usb_viewer.html">Open USB viewer</a>
+  </section>
+</div>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var enc = new TextEncoder(), dec = new TextDecoder();
+  var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+
+  var mainBytes = null, usingLocal = false;
+  var port = null, reader = null, writer = null, reading = false, readDone = null, rx = '';
+
+  if (!('serial' in navigator)) $('unsupported').style.display = 'block';
+
+  function log(msg) {
+    var el = $('log');
+    el.textContent += msg + '\n';
+    el.scrollTop = el.scrollHeight;
+  }
+
+  // ---- main.py source ------------------------------------------------------
+  async function loadMain() {
+    try {
+      var r = await fetch('main.py?t=' + Date.now(), { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      mainBytes = new Uint8Array(await r.arrayBuffer());
+      usingLocal = false;
+      $('src').className = 'ok';
+      $('src').textContent = 'main.py fetched from this site: ' + mainBytes.length + ' bytes';
+      return true;
+    } catch (e) {
+      mainBytes = null;
+      $('src').className = 'warn';
+      $('src').textContent = 'Could not fetch main.py (' + e.message + '). ' +
+        (location.protocol === 'file:'
+          ? 'Open this page from a web server instead of a file, or choose the file below.'
+          : 'Put main.py next to this page, or choose the file below.');
+      $('local').open = true;
+      return false;
+    }
+  }
+
+  $('file').addEventListener('change', async function () {
+    var f = $('file').files[0];
+    if (!f) return;
+    mainBytes = new Uint8Array(await f.arrayBuffer());
+    usingLocal = true;
+    $('src').className = 'ok';
+    $('src').textContent = 'Using local file ' + f.name + ': ' + mainBytes.length + ' bytes';
+  });
+
+  // ---- serial helpers -----------------------------------------------------
+  function startReading() {
+    reading = true;
+    rx = '';
+    readDone = (async function () {
+      while (reading && port && port.readable) {
+        reader = port.readable.getReader();
+        try {
+          for (;;) {
+            var r = await reader.read();
+            if (r.done) break;
+            rx += dec.decode(r.value, { stream: true });
+            if (rx.length > 65536) rx = rx.slice(-8192);
+          }
+        } catch (e) {
+        } finally {
+          try { reader.releaseLock(); } catch (e2) {}
+          reader = null;
+        }
+      }
+    })();
+  }
+
+  async function closePort() {
+    reading = false;
+    try { if (reader) await reader.cancel(); } catch (e) {}
+    try { if (readDone) await readDone; } catch (e) {}
+    try { if (writer) writer.releaseLock(); } catch (e) {}
+    writer = null;
+    try { if (port) await port.close(); } catch (e) {}
+    port = null;
+  }
+
+  async function write(str) { await writer.write(enc.encode(str)); }
+
+  async function writePaced(str) {          // small slices: the board has a tiny RX buffer
+    for (var i = 0; i < str.length; i += 128) {
+      await write(str.slice(i, i + 128));
+      await sleep(6);
+    }
+  }
+
+  async function readUntil(token, timeoutMs) {
+    var t0 = performance.now();
+    while (performance.now() - t0 < timeoutMs) {
+      var i = rx.indexOf(token);
+      if (i >= 0) {
+        var out = rx.slice(0, i + token.length);
+        rx = rx.slice(i + token.length);
+        return out;
+      }
+      await sleep(8);
+    }
+    throw new Error('timeout waiting for ' + JSON.stringify(token));
+  }
+
+  async function hardReset() {              // works on boards with the usual DTR/RTS auto-reset
+    try {
+      await port.setSignals({ dataTerminalReady: false, requestToSend: true });
+      await sleep(120);
+      await port.setSignals({ dataTerminalReady: false, requestToSend: false });
+    } catch (e) {}
+  }
+
+  async function enterRaw() {
+    var t0 = performance.now();
+    while (performance.now() - t0 < 20000) {
+      await write('\x03\x03');              // interrupt main.py (works in its 4 s boot window)
+      await sleep(120);
+      await write('\x01');                  // Ctrl-A: raw REPL
+      try {
+        await readUntil('raw REPL; CTRL-B to exit\r\n>', 700);
+        return;
+      } catch (e) {}
+    }
+    throw new Error('the board did not answer at 115200 baud');
+  }
+
+  async function rawExec(code, timeout) {
+    rx = '';
+    await writePaced(code);
+    await write('\x04');
+    await readUntil('OK', 3000);
+    var out = (await readUntil('\x04', timeout || 8000)).slice(0, -1);
+    var err = (await readUntil('\x04', 3000)).slice(0, -1);
+    await readUntil('>', 3000);
+    if (err.trim()) throw new Error(err.trim().split('\n').slice(-2).join(' '));
+    return out;
+  }
+
+  function b64(bytes) {
+    var s = '';
+    for (var i = 0; i < bytes.length; i += 0x4000) {
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x4000));
+    }
+    return btoa(s);
+  }
+
+  // ---- install ------------------------------------------------------------
+  async function install() {
+    $('log').textContent = '';
+    if (!('serial' in navigator)) { log('Web Serial is not available in this browser.'); return; }
+    if (!usingLocal) { if (!(await loadMain())) return; }
+    if (!mainBytes || !mainBytes.length) { log('main.py is empty.'); return; }
+
+    var ssid = $('ssid').value.trim();
+    var pw = $('pw').value;
+    var btn = $('install'), prog = $('prog');
+    btn.disabled = true;
+    prog.hidden = false;
+    prog.value = 0;
+    $('viewer').classList.remove('good');
+
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200, bufferSize: 1 << 16 });
+      writer = port.writable.getWriter();
+      startReading();
+
+      log('Port open. Resetting the board...');
+      await hardReset();
+      log('Waiting for the REPL. If nothing happens, press the board RESET button now.');
+      await enterRaw();
+      log('REPL ready.');
+
+      await rawExec(
+        "import os, binascii\n" +
+        "try:\n os.remove('_main.tmp')\nexcept OSError:\n pass\n" +
+        "f = open('_main.tmp', 'wb')");
+
+      var CH = 700;
+      var total = mainBytes.length;
+      for (var off = 0; off < total; off += CH) {
+        var part = mainBytes.subarray(off, Math.min(off + CH, total));
+        await rawExec("f.write(binascii.a2b_base64('" + b64(part) + "'))");
+        prog.value = Math.round(Math.min(off + CH, total) * 100 / total);
+      }
+
+      var out = await rawExec(
+        "f.close()\n" +
+        "try:\n os.remove('main.py')\nexcept OSError:\n pass\n" +
+        "os.rename('_main.tmp', 'main.py')\n" +
+        "print(os.stat('main.py')[6])");
+      var size = parseInt(out.trim(), 10);
+      if (size !== total) throw new Error('size check failed: board has ' + size + ' bytes, expected ' + total);
+      log('main.py written (' + size + ' bytes, verified).');
+
+      if (ssid) {
+        var json = JSON.stringify({ ssid: ssid, password: pw });
+        await rawExec("open('wifi.json', 'w').write(binascii.a2b_base64('" +
+                      b64(enc.encode(json)) + "').decode())");
+        log('WiFi "' + ssid + '" saved on the board.');
+      }
+
+      await write('\x02');                  // leave raw REPL
+      await sleep(200);
+      await write('\x04');                  // soft reboot: runs the new main.py
+      await sleep(600);
+      prog.value = 100;
+      log('Done. The board is restarting: wait about 5 seconds, then open the USB viewer.');
+      $('viewer').classList.add('good');
+    } catch (e) {
+      log('FAILED: ' + e.message);
+      log('If the camera script is already running: open the USB viewer, press "Exit to REPL", then try again. ' +
+          'Or press the board RESET button right after pressing Install.');
+    } finally {
+      await closePort();
+      btn.disabled = false;
+    }
+  }
+
+  $('install').addEventListener('click', install);
+  loadMain();
+})();
+</script>
+</body>
+</html>
