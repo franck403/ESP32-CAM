@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 USB Camera</title>
+<style>
+  html,body{height:100%;margin:0;background:#111;color:#eee;
+            font-family:system-ui,Arial,sans-serif}
+  .wrap{height:100%;box-sizing:border-box;padding:12px;display:flex;
+        flex-direction:column;gap:10px;overflow:auto}
+  .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;color:#9aa}
+  button,select,input[type=number],input[type=text],input[type=password]{
+        background:#222;color:#eee;border:1px solid #444;
+        border-radius:4px;padding:6px 10px;font-size:13px}
+  input[type=number]{width:90px}
+  input[type=text],input[type=password]{width:150px}
+  button{cursor:pointer}
+  button:disabled{opacity:.4;cursor:default}
+  canvas{flex:1 1 0;min-height:0;width:100%;object-fit:contain;display:block;
+         background:#000;border:1px solid #333;border-radius:6px;align-self:stretch}
+  canvas:fullscreen{width:100vw;height:100vh;border:0;border-radius:0;object-fit:contain}
+  #status{font-size:13px;color:#9aa;text-align:center}
+  details{font-size:13px;color:#9aa;background:#181818;border:1px solid #2a2a2a;
+          border-radius:6px;padding:8px 12px}
+  summary{cursor:pointer;color:#cde}
+  .grid{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;margin:10px 0}
+  .grp{display:flex;gap:8px;align-items:center}
+  #board{margin-top:6px;color:#8c9;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <button id="connect">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+    <label>Baud <input id="baud" type="number" value="921600"></label>
+    <label>Scale
+      <select id="scale">
+        <option value="fit">Fit window</option>
+        <option value="1">1x</option>
+        <option value="2">2x</option>
+        <option value="3">3x</option>
+        <option value="4">4x</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="smooth" checked> Smooth</label>
+    <button id="snap">Snapshot</button>
+    <button id="full">Fullscreen</button>
+  </div>
+
+  <canvas id="c" width="320" height="240"></canvas>
+  <div id="status">Not connected</div>
+
+  <details id="settings">
+    <summary>Board settings (WiFi stream and USB)</summary>
+    <div class="grid">
+      <div class="grp">
+        <label>Mode
+          <select id="s_mode">
+            <option value="free">Follow WiFi page</option>
+            <option value="jpg">Color JPEG</option>
+            <option value="jpgg">Gray JPEG</option>
+            <option value="gray">Gray (delta)</option>
+            <option value="yuv">Color YUV 4-bit</option>
+            <option value="rgb">Color RGB332</option>
+            <option value="rgbhq">Color RGB565 (slow)</option>
+          </select>
+        </label>
+        <button id="a_mode" disabled>Apply</button>
+      </div>
+      <div class="grp">
+        <label>WiFi JPEG quality
+          <select id="s_q">
+            <option value="auto">Auto</option>
+            <option value="0">20</option>
+            <option value="1">35</option>
+            <option value="2">50</option>
+            <option value="3">65</option>
+          </select>
+        </label>
+        <button id="a_q" disabled>Apply</button>
+      </div>
+      <div class="grp">
+        <label>USB JPEG quality
+          <input id="s_usbq" type="number" min="1" max="100" value="60">
+        </label>
+        <button id="a_usbq" disabled>Apply</button>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="grp">
+        <label>WiFi SSID <input id="s_ssid" type="text" autocomplete="off"></label>
+        <label>Password <input id="s_pw" type="password" autocomplete="off"></label>
+        <button id="a_wifi" disabled>Save and connect</button>
+      </div>
+      <div class="grp">
+        <button id="a_repl" disabled>Exit to REPL</button>
+        <button id="a_reboot" disabled>Reboot board</button>
+      </div>
+    </div>
+    <div id="board">-</div>
+  </details>
+</div>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var canvas = $('c');
+  var ctx = canvas.getContext('2d', { alpha: false });
+  var statusEl = $('status'), boardEl = $('board');
+  var btnConnect = $('connect'), btnDisconnect = $('disconnect');
+  var baudEl = $('baud'), scaleEl = $('scale'), smoothEl = $('smooth');
+  var settingBtns = ['a_mode', 'a_q', 'a_usbq', 'a_wifi', 'a_repl', 'a_reboot'];
+
+  var MAX_JPEG = 2 * 1024 * 1024;
+  var textEnc = new TextEncoder(), textDec = new TextDecoder();
+
+  var port = null, reader = null, writer = null, running = false, loopDone = null;
+  var buf = new Uint8Array(1 << 16), blen = 0;
+  var frames = 0, bytes = 0, tStat = performance.now();
+  var seq = 0, shown = 0, gotPacket = false, beat = null;
+
+  function setStatus(t) { statusEl.textContent = t; }
+
+  // ---- view (all scaling happens here, in the browser) -------------------
+  function applyView() {
+    canvas.style.imageRendering = smoothEl.checked ? 'auto' : 'pixelated';
+    var s = scaleEl.value;
+    if (s === 'fit') {
+      canvas.style.flex = '1 1 0';
+      canvas.style.width = '100%';
+      canvas.style.height = '';
+      canvas.style.alignSelf = 'stretch';
+    } else {
+      var k = parseInt(s, 10);
+      canvas.style.flex = 'none';
+      canvas.style.width = (canvas.width * k) + 'px';
+      canvas.style.height = (canvas.height * k) + 'px';
+      canvas.style.alignSelf = 'center';
+    }
+  }
+  scaleEl.addEventListener('change', applyView);
+  smoothEl.addEventListener('change', applyView);
+
+  $('full').addEventListener('click', function () {
+    if (canvas.requestFullscreen) canvas.requestFullscreen();
+  });
+  $('snap').addEventListener('click', function () {
+    canvas.toBlob(function (b) {
+      if (!b) return;
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = 'esp32-cam-' + Date.now() + '.png';
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
+    }, 'image/png');
+  });
+
+  // ---- commands to the board ---------------------------------------------
+  async function send(obj) {
+    if (!writer) return;
+    try { await writer.write(textEnc.encode(JSON.stringify(obj) + '\n')); } catch (e) {}
+  }
+
+  function enableSettings(on) {
+    settingBtns.forEach(function (id) { $(id).disabled = !on; });
+  }
+
+  $('a_mode').addEventListener('click', function () { send({ cmd: 'mode', mode: $('s_mode').value }); });
+  $('a_q').addEventListener('click', function () {
+    var v = $('s_q').value;
+    send({ cmd: 'quality', q: v === 'auto' ? 'auto' : parseInt(v, 10) });
+  });
+  $('a_usbq').addEventListener('click', function () {
+    send({ cmd: 'usbq', q: parseInt($('s_usbq').value, 10) || 60 });
+  });
+  $('a_wifi').addEventListener('click', function () {
+    var ssid = $('s_ssid').value.trim();
+    if (!ssid) { boardEl.textContent = 'Enter a WiFi name first.'; return; }
+    send({ cmd: 'wifi', ssid: ssid, password: $('s_pw').value });
+    boardEl.textContent = 'WiFi saved on the board, connecting...';
+  });
+  $('a_reboot').addEventListener('click', function () { send({ cmd: 'reboot' }); });
+  $('a_repl').addEventListener('click', async function () {
+    await send({ cmd: 'repl' });
+    setTimeout(function () { disconnect().then(function () {
+      setStatus('Board is back on the normal REPL (115200 baud).');
+    }); }, 300);
+  });
+
+  function onMsg(m) {
+    if (m.t === 'status') {
+      var wifi = m.wifi
+        ? ('WiFi ' + m.ssid + '  http://' + m.ip + '  ' + m.rssi + ' dBm')
+        : ('WiFi not connected' + (m.ssid ? ' (' + m.ssid + ')' : ' (no network saved)'));
+      boardEl.textContent =
+        'Mode: ' + m.mode + (m.locked ? ' (set from USB)' : ' (follows WiFi page)') +
+        '  |  WiFi JPEG: ' + (m.q === 'auto' ? 'auto' : 'fixed') + ', now ' + m.qlevel +
+        '  |  USB JPEG ' + m.usbq + '  |  ' + wifi + '  |  link ' + m.baud + ' baud' +
+        (m.jpeg ? '' : '  |  no jpeg module in this firmware');
+      if (document.activeElement !== $('s_ssid') && !$('s_ssid').value && m.ssid) {
+        $('s_ssid').value = m.ssid;
+      }
+    } else if (m.t === 'error') {
+      boardEl.textContent = 'Board error: ' + m.msg;
+    }
+  }
+
+  // ---- frame / message parsing -------------------------------------------
+  // A5 5A C3 3C | len | JPEG      A5 5A C3 3D | len | JSON      (anything else is skipped)
+  function append(chunk) {
+    if (blen + chunk.length > buf.length) {
+      var nb = new Uint8Array(Math.max(buf.length * 2, blen + chunk.length));
+      nb.set(buf.subarray(0, blen));
+      buf = nb;
+    }
+    buf.set(chunk, blen);
+    blen += chunk.length;
+  }
+
+  function consume(n) {
+    buf.copyWithin(0, n, blen);
+    blen -= n;
+  }
+
+  function showJpeg(data) {
+    var my = ++seq;
+    createImageBitmap(new Blob([data], { type: 'image/jpeg' })).then(function (bmp) {
+      if (my > shown) {                       // never draw an older frame over a newer one
+        shown = my;
+        if (bmp.width !== canvas.width || bmp.height !== canvas.height) {
+          canvas.width = bmp.width;
+          canvas.height = bmp.height;
+          applyView();
+        }
+        ctx.drawImage(bmp, 0, 0);
+        frames++;
+      }
+      bmp.close();
+    }).catch(function () {});
+  }
+
+  function parse() {
+    for (;;) {
+      var found = -1;
+      for (var i = 0; i + 8 <= blen; i++) {
+        if (buf[i] === 0xA5 && buf[i + 1] === 0x5A && buf[i + 2] === 0xC3 &&
+            (buf[i + 3] === 0x3C || buf[i + 3] === 0x3D)) {
+          found = i;
+          break;
+        }
+      }
+      if (found < 0) {                         // keep a tail in case the magic is split
+        if (blen > 7) consume(blen - 7);
+        return;
+      }
+      if (found > 0) consume(found);
+      var kind = buf[3];
+      var len = buf[4] | (buf[5] << 8) | (buf[6] << 16) | (buf[7] * 16777216);
+
+      if (kind === 0x3D) {                     // status / error message
+        if (len < 2 || len > 8192) { consume(1); continue; }
+        if (blen < 8 + len) return;
+        try { onMsg(JSON.parse(textDec.decode(buf.subarray(8, 8 + len)))); } catch (e) {}
+        gotPacket = true;
+        consume(8 + len);
+        continue;
+      }
+
+      if (len < 4 || len > MAX_JPEG) { consume(1); continue; }
+      if (blen < 8 + len) return;              // wait for the rest of the frame
+      if (buf[8] !== 0xFF || buf[9] !== 0xD8 ||
+          buf[8 + len - 2] !== 0xFF || buf[8 + len - 1] !== 0xD9) {
+        consume(1);                            // not a real JPEG: resync
+        continue;
+      }
+      gotPacket = true;
+      showJpeg(buf.slice(8, 8 + len));         // slice() copies
+      consume(8 + len);
+    }
+  }
+
+  // ---- serial ------------------------------------------------------------
+  async function readLoop() {
+    while (running && port && port.readable) {
+      reader = port.readable.getReader();
+      try {
+        for (;;) {
+          var r = await reader.read();
+          if (r.done) break;
+          if (r.value && r.value.length) {
+            bytes += r.value.length;
+            append(r.value);
+            parse();
+          }
+        }
+      } catch (e) {
+        setStatus('Read error: ' + e.message);   // non-fatal errors: loop re-opens the reader
+      } finally {
+        try { reader.releaseLock(); } catch (e2) {}
+        reader = null;
+      }
+    }
+  }
+
+  async function connect() {
+    if (!('serial' in navigator)) {
+      setStatus('Web Serial is not available: use Chrome or Edge on a PC.');
+      return;
+    }
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: parseInt(baudEl.value, 10) || 921600, bufferSize: 1 << 18 });
+      try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (e) {}
+      writer = port.writable.getWriter();
+    } catch (e) {
+      setStatus('Could not open the port: ' + e.message);
+      port = null;
+      return;
+    }
+    blen = 0; frames = 0; bytes = 0; tStat = performance.now(); gotPacket = false;
+    running = true;
+    btnConnect.disabled = true;
+    btnDisconnect.disabled = false;
+    enableSettings(true);
+    setStatus('Connected, waiting for the board...');
+
+    send({ cmd: 'usb', on: true });
+    send({ cmd: 'get' });
+    beat = setInterval(function () { send({ cmd: 'get' }); }, 2000);   // keeps USB streaming alive
+    setTimeout(function () {
+      if (running && !gotPacket) {
+        setStatus('No data yet. Wait ~5 s after the board boots, and check the baud ' +
+                  '(921600, or 115200 if the board printed that fast mode failed).');
+      }
+    }, 3500);
+
+    loopDone = readLoop();
+    await loopDone;
+    if (running) { await disconnect(); setStatus('Port closed'); }
+  }
+
+  async function disconnect() {
+    var wasRunning = running;
+    running = false;
+    if (beat) { clearInterval(beat); beat = null; }
+    if (wasRunning && writer) {
+      try { await writer.write(textEnc.encode(JSON.stringify({ cmd: 'usb', on: false }) + '\n')); } catch (e) {}
+    }
+    try { if (reader) await reader.cancel(); } catch (e) {}
+    try { if (loopDone) await loopDone; } catch (e) {}
+    try { if (writer) { writer.releaseLock(); } } catch (e) {}
+    writer = null;
+    try { if (port) await port.close(); } catch (e) {}
+    port = null;
+    btnConnect.disabled = false;
+    btnDisconnect.disabled = true;
+    enableSettings(false);
+    setStatus('Disconnected');
+  }
+
+  btnConnect.addEventListener('click', connect);
+  btnDisconnect.addEventListener('click', disconnect);
+  if ('serial' in navigator) {
+    navigator.serial.addEventListener('disconnect', function () {
+      if (running) disconnect().then(function () { setStatus('Device unplugged'); });
+    });
+  }
+
+  setInterval(function () {
+    if (!running || !gotPacket) return;
+    var now = performance.now();
+    var dt = (now - tStat) / 1000;
+    setStatus(canvas.width + 'x' + canvas.height + '  ' +
+              (frames / dt).toFixed(1) + ' fps  ' +
+              (bytes / 1024 / dt).toFixed(0) + ' KB/s');
+    frames = 0; bytes = 0; tStat = now;
+  }, 1000);
+
+  applyView();
+})();
+</script>
+</body>
+</html>
