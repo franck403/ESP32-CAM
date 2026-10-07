@@ -17,9 +17,14 @@
   input[type=text],input[type=password]{width:150px}
   button{cursor:pointer}
   button:disabled{opacity:.4;cursor:default}
-  canvas{flex:1 1 0;min-height:0;width:100%;object-fit:contain;display:block;
-         background:#000;border:1px solid #333;border-radius:6px;align-self:stretch}
-  canvas:fullscreen{width:100vw;height:100vh;border:0;border-radius:0;object-fit:contain}
+
+  /* the canvas is sized by JS, the stage just gives it room */
+  .stage{flex:1 1 0;min-height:140px;display:flex;align-items:center;
+         justify-content:center;overflow:hidden}
+  canvas{display:block;background:#000;border:1px solid #333;border-radius:6px}
+  canvas:fullscreen{width:100vw !important;height:100vh !important;
+                    border:0;border-radius:0;object-fit:contain}
+
   #status{font-size:13px;color:#9aa;text-align:center}
   details{font-size:13px;color:#9aa;background:#181818;border:1px solid #2a2a2a;
           border-radius:6px;padding:8px 12px}
@@ -27,6 +32,23 @@
   .grid{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;margin:10px 0}
   .grp{display:flex;gap:8px;align-items:center}
   #board{margin-top:6px;color:#8c9;line-height:1.5}
+
+  /* ---- toasts -------------------------------------------------------- */
+  #toasts{position:fixed;right:14px;bottom:14px;z-index:9999;
+          display:flex;flex-direction:column;gap:8px;align-items:flex-end;
+          max-width:min(440px,86vw);pointer-events:none}
+  .toast{pointer-events:auto;background:#1b2029;border:1px solid #38414f;
+         border-left:4px solid #4a9eff;border-radius:6px;padding:9px 12px;
+         font-size:12.5px;line-height:1.45;color:#dbe4f0;
+         box-shadow:0 8px 22px rgba(0,0,0,.55);
+         white-space:pre-wrap;word-break:break-word;
+         animation:tin .18s ease-out}
+  .toast .tt{display:block;font-weight:600;color:#fff;margin-bottom:2px}
+  .toast.text{border-left-color:#ffb454}
+  .toast.err{border-left-color:#ff5f56}
+  .toast.ok{border-left-color:#4cd964}
+  .toast.fade{opacity:0;transition:opacity .3s}
+  @keyframes tin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 </style>
 </head>
 <body>
@@ -49,7 +71,7 @@
     <button id="full">Fullscreen</button>
   </div>
 
-  <canvas id="c" width="320" height="240"></canvas>
+  <div class="stage" id="stage"><canvas id="c" width="320" height="240"></canvas></div>
   <div id="status">Not connected</div>
 
   <details id="settings">
@@ -102,12 +124,21 @@
     <div id="board">-</div>
   </details>
 </div>
+
+<div id="toasts"></div>
+
 <script>
 (function () {
+  'use strict';
+
   var $ = function (id) { return document.getElementById(id); };
-  var canvas = $('c');
-  var ctx = canvas.getContext('2d', { alpha: false });
-  var statusEl = $('status'), boardEl = $('board');
+
+  var canvas   = $('c');
+  var ctx      = canvas.getContext('2d', { alpha: false });
+  var stage    = $('stage');
+  var statusEl = $('status');
+  var boardEl  = $('board');
+  var toastsEl = $('toasts');
   var btnConnect = $('connect'), btnDisconnect = $('disconnect');
   var baudEl = $('baud'), scaleEl = $('scale'), smoothEl = $('smooth');
   var settingBtns = ['a_mode', 'a_q', 'a_usbq', 'a_wifi', 'a_repl', 'a_reboot'];
@@ -115,32 +146,59 @@
   var MAX_JPEG = 2 * 1024 * 1024;
   var textEnc = new TextEncoder(), textDec = new TextDecoder();
 
-  var port = null, reader = null, writer = null, running = false, loopDone = null;
-  var buf = new Uint8Array(1 << 16), blen = 0;
-  var frames = 0, bytes = 0, tStat = performance.now();
-  var seq = 0, shown = 0, gotPacket = false, beat = null;
+  /* ================================================================== */
+  /*  Toasts                                                            */
+  /* ================================================================== */
+  var lastToastKey = '', lastToastAt = 0;
 
-  function setStatus(t) { statusEl.textContent = t; }
+  function toast(title, msg, kind) {
+    msg = String(msg == null ? '' : msg);
+    var key = title + '\u0000' + msg, now = Date.now();
+    if (key === lastToastKey && now - lastToastAt < 2500) return;   // de-duplicate
+    lastToastKey = key; lastToastAt = now;
 
-  // ---- view (all scaling happens here, in the browser) -------------------
+    var d = document.createElement('div');
+    d.className = 'toast' + (kind ? ' ' + kind : '');
+    var t = document.createElement('span');
+    t.className = 'tt';
+    t.textContent = title;
+    d.appendChild(t);
+    d.appendChild(document.createTextNode(msg));
+    toastsEl.appendChild(d);
+    while (toastsEl.children.length > 6) toastsEl.removeChild(toastsEl.firstChild);
+    setTimeout(function () {
+      d.classList.add('fade');
+      setTimeout(function () { if (d.parentNode) d.parentNode.removeChild(d); }, 350);
+    }, kind === 'err' ? 8000 : 5000);
+  }
+
+  /* ================================================================== */
+  /*  View — everything is scaled here in the browser                   */
+  /* ================================================================== */
   function applyView() {
     canvas.style.imageRendering = smoothEl.checked ? 'auto' : 'pixelated';
+    var cw = canvas.width || 1, ch = canvas.height || 1;
     var s = scaleEl.value;
+
     if (s === 'fit') {
-      canvas.style.flex = '1 1 0';
-      canvas.style.width = '100%';
-      canvas.style.height = '';
-      canvas.style.alignSelf = 'stretch';
+      var r = stage.getBoundingClientRect();
+      var availW = Math.max(32, r.width  - 4);
+      var availH = Math.max(32, r.height - 4);
+      var k = Math.min(availW / cw, availH / ch);
+      canvas.style.width  = Math.max(1, Math.floor(cw * k)) + 'px';
+      canvas.style.height = Math.max(1, Math.floor(ch * k)) + 'px';
     } else {
-      var k = parseInt(s, 10);
-      canvas.style.flex = 'none';
-      canvas.style.width = (canvas.width * k) + 'px';
-      canvas.style.height = (canvas.height * k) + 'px';
-      canvas.style.alignSelf = 'center';
+      var k2 = parseInt(s, 10) || 1;
+      canvas.style.width  = (cw * k2) + 'px';
+      canvas.style.height = (ch * k2) + 'px';
     }
   }
+
   scaleEl.addEventListener('change', applyView);
   smoothEl.addEventListener('change', applyView);
+  window.addEventListener('resize', applyView);
+  if (window.ResizeObserver) new ResizeObserver(applyView).observe(stage);
+  document.addEventListener('fullscreenchange', function () { setTimeout(applyView, 0); });
 
   $('full').addEventListener('click', function () {
     if (canvas.requestFullscreen) canvas.requestFullscreen();
@@ -156,7 +214,9 @@
     }, 'image/png');
   });
 
-  // ---- commands to the board ---------------------------------------------
+  /* ================================================================== */
+  /*  Commands to the board                                             */
+  /* ================================================================== */
   async function send(obj) {
     if (!writer) return;
     try { await writer.write(textEnc.encode(JSON.stringify(obj) + '\n')); } catch (e) {}
@@ -183,12 +243,21 @@
   $('a_reboot').addEventListener('click', function () { send({ cmd: 'reboot' }); });
   $('a_repl').addEventListener('click', async function () {
     await send({ cmd: 'repl' });
-    setTimeout(function () { disconnect().then(function () {
-      setStatus('Board is back on the normal REPL (115200 baud).');
-    }); }, 300);
+    setTimeout(function () {
+      disconnect().then(function () {
+        setStatus('Board is back on the normal REPL (115200 baud).');
+      });
+    }, 300);
   });
 
+  /* ================================================================== */
+  /*  Board status messages                                             */
+  /* ================================================================== */
+  var warnedNoJpeg = false;
+
   function onMsg(m) {
+    if (!m || typeof m !== 'object') return;
+
     if (m.t === 'status') {
       var wifi = m.wifi
         ? ('WiFi ' + m.ssid + '  http://' + m.ip + '  ' + m.rssi + ' dBm')
@@ -201,13 +270,36 @@
       if (document.activeElement !== $('s_ssid') && !$('s_ssid').value && m.ssid) {
         $('s_ssid').value = m.ssid;
       }
+      if (!m.jpeg && !warnedNoJpeg) {
+        warnedNoJpeg = true;
+        toast('No JPEG encoder on the board',
+              'This firmware has no "jpeg" module, so no frames can be sent over USB.',
+              'err');
+      }
     } else if (m.t === 'error') {
       boardEl.textContent = 'Board error: ' + m.msg;
+      toast('Board error', m.msg, 'err');
     }
   }
 
-  // ---- frame / message parsing -------------------------------------------
-  // A5 5A C3 3C | len | JPEG      A5 5A C3 3D | len | JSON      (anything else is skipped)
+  /* ================================================================== */
+  /*  Serial framing                                                    */
+  /*    A5 5A C3 3C | len u32 LE | JPEG                                 */
+  /*    A5 5A C3 3D | len u32 LE | JSON text                            */
+  /*  Anything else is collected and, when it is readable text, shown   */
+  /*  in a toast ("the board sent a string, not an image").             */
+  /* ================================================================== */
+  var buf  = new Uint8Array(1 << 16), blen = 0;
+  var trash = new Uint8Array(4096), trashLen = 0, trashTimer = null;
+  var waitStart = 0;
+
+  var port = null, reader = null, writer = null, running = false, loopDone = null;
+  var frames = 0, bytes = 0, tStat = performance.now();
+  var seq = 0, shown = 0, gotPacket = false, gotFrame = false, beat = null;
+  var decodeFails = 0;
+
+  function setStatus(t) { statusEl.textContent = t; }
+
   function append(chunk) {
     if (blen + chunk.length > buf.length) {
       var nb = new Uint8Array(Math.max(buf.length * 2, blen + chunk.length));
@@ -219,59 +311,126 @@
   }
 
   function consume(n) {
+    if (n <= 0) return;
     buf.copyWithin(0, n, blen);
     blen -= n;
+    waitStart = 0;
   }
 
+  /* ---- leftover bytes: text from the board --------------------------- */
+  function addTrash(start, n) {
+    if (n <= 0) return;
+    if (trashLen + n > trash.length) {
+      var keep = Math.min(trashLen, 1024);
+      trash.copyWithin(0, trashLen - keep, trashLen);
+      trashLen = keep;
+      if (trashLen + n > trash.length) n = trash.length - trashLen;
+    }
+    trash.set(buf.subarray(start, start + n), trashLen);
+    trashLen += n;
+    if (!trashTimer) {
+      trashTimer = setTimeout(function () { trashTimer = null; flushTrash(); }, 350);
+    }
+  }
+
+  function flushTrash() {
+    if (!trashLen) return;
+    var n = trashLen;
+    trashLen = 0;
+
+    var printable = 0, s = '';
+    for (var i = 0; i < n; i++) {
+      var b = trash[i];
+      if (b === 9 || b === 10 || b === 13 || b === 32) { printable++; s += ' '; }
+      else if (b >= 33 && b < 127) { printable++; s += String.fromCharCode(b); }
+      else { s += '\u00b7'; }
+    }
+    // only report it when it really is text, not binary noise
+    if (printable < 4 || printable < n * 0.9) return;
+    var txt = s.replace(/\s+/g, ' ').trim();
+    if (txt) toast('Board sent text (not an image)', txt, 'text');
+  }
+
+  function dropOne() {
+    addTrash(0, 1);
+    consume(1);
+  }
+
+  /* while waiting for the rest of a packet, give up after a while so a
+     false sync word can never wedge the parser forever */
+  function waitedTooLong() {
+    var now = performance.now();
+    if (!waitStart) { waitStart = now; return false; }
+    if (now - waitStart > 1500) { waitStart = 0; return true; }
+    return false;
+  }
+
+  /* ---- image --------------------------------------------------------- */
   function showJpeg(data) {
     var my = ++seq;
     createImageBitmap(new Blob([data], { type: 'image/jpeg' })).then(function (bmp) {
       if (my > shown) {                       // never draw an older frame over a newer one
         shown = my;
         if (bmp.width !== canvas.width || bmp.height !== canvas.height) {
-          canvas.width = bmp.width;
+          canvas.width  = bmp.width;
           canvas.height = bmp.height;
           applyView();
         }
         ctx.drawImage(bmp, 0, 0);
         frames++;
+        gotFrame = true;
       }
       bmp.close();
-    }).catch(function () {});
+    }, function (err) {
+      decodeFails++;
+      if (decodeFails === 1 || decodeFails % 60 === 0) {
+        toast('JPEG decode failed',
+              (err && err.message ? err.message : String(err)) +
+              '  (' + decodeFails + ' frames)', 'err');
+      }
+    });
   }
 
+  /* ---- parser -------------------------------------------------------- */
   function parse() {
     for (;;) {
+      /* 1. find the 4-byte sync word (0xA5 0x5A 0xC3 0x3C/0x3D) */
       var found = -1;
-      for (var i = 0; i + 8 <= blen; i++) {
+      for (var i = 0; i + 4 <= blen; i++) {
         if (buf[i] === 0xA5 && buf[i + 1] === 0x5A && buf[i + 2] === 0xC3 &&
-            (buf[i + 3] === 0x3C || buf[i + 3] === 0x3D)) {
-          found = i;
-          break;
-        }
+            (buf[i + 3] === 0x3C || buf[i + 3] === 0x3D)) { found = i; break; }
       }
-      if (found < 0) {                         // keep a tail in case the magic is split
-        if (blen > 7) consume(blen - 7);
+      if (found < 0) {
+        var keep = 3;                          // magic might be split across reads
+        if (blen > keep) { addTrash(0, blen - keep); consume(blen - keep); }
         return;
       }
-      if (found > 0) consume(found);
-      var kind = buf[3];
-      var len = buf[4] | (buf[5] << 8) | (buf[6] << 16) | (buf[7] * 16777216);
+      if (found > 0) { addTrash(0, found); consume(found); }
 
-      if (kind === 0x3D) {                     // status / error message
-        if (len < 2 || len > 8192) { consume(1); continue; }
-        if (blen < 8 + len) return;
-        try { onMsg(JSON.parse(textDec.decode(buf.subarray(8, 8 + len)))); } catch (e) {}
+      /* 2. header */
+      if (blen < 8) return;
+      var kind = buf[3];
+      var len  = (buf[4] | (buf[5] << 8) | (buf[6] << 16)) + buf[7] * 16777216;
+
+      /* 3a. JSON status message */
+      if (kind === 0x3D) {
+        if (len < 2 || len > 8192) { dropOne(); continue; }
+        if (blen < 8 + len) { if (waitedTooLong()) { dropOne(); continue; } return; }
+        var txt = textDec.decode(buf.subarray(8, 8 + len));
         gotPacket = true;
+        try { onMsg(JSON.parse(txt)); }
+        catch (e) { toast('Board message', txt, 'text'); }
         consume(8 + len);
         continue;
       }
 
-      if (len < 4 || len > MAX_JPEG) { consume(1); continue; }
-      if (blen < 8 + len) return;              // wait for the rest of the frame
-      if (buf[8] !== 0xFF || buf[9] !== 0xD8 ||
-          buf[8 + len - 2] !== 0xFF || buf[8 + len - 1] !== 0xD9) {
-        consume(1);                            // not a real JPEG: resync
+      /* 3b. JPEG frame */
+      if (len < 4 || len > MAX_JPEG) { dropOne(); continue; }
+      if (blen < 10) return;
+      if (buf[8] !== 0xFF || buf[9] !== 0xD8) { dropOne(); continue; }   // no SOI
+      if (blen < 8 + len) { if (waitedTooLong()) { dropOne(); continue; } return; }
+      if (buf[8 + len - 2] !== 0xFF || buf[8 + len - 1] !== 0xD9) {      // no EOI
+        dropOne();
         continue;
       }
       gotPacket = true;
@@ -280,7 +439,9 @@
     }
   }
 
-  // ---- serial ------------------------------------------------------------
+  /* ================================================================== */
+  /*  Serial port                                                       */
+  /* ================================================================== */
   async function readLoop() {
     while (running && port && port.readable) {
       reader = port.readable.getReader();
@@ -289,14 +450,13 @@
           var r = await reader.read();
           if (r.done) break;
           if (r.value && r.value.length) {
-            console.log(r.value)
             bytes += r.value.length;
             append(r.value);
             parse();
           }
         }
       } catch (e) {
-        setStatus('Read error: ' + e.message);   // non-fatal errors: loop re-opens the reader
+        setStatus('Read error: ' + e.message);   // non-fatal: the loop re-opens the reader
       } finally {
         try { reader.releaseLock(); } catch (e2) {}
         reader = null;
@@ -307,6 +467,7 @@
   async function connect() {
     if (!('serial' in navigator)) {
       setStatus('Web Serial is not available: use Chrome or Edge on a PC.');
+      toast('Web Serial unavailable', 'Use Chrome or Edge on a desktop PC.', 'err');
       return;
     }
     try {
@@ -319,16 +480,22 @@
       port = null;
       return;
     }
-    blen = 0; frames = 0; bytes = 0; tStat = performance.now(); gotPacket = false;
+
+    blen = 0; trashLen = 0; waitStart = 0;
+    frames = 0; bytes = 0; tStat = performance.now();
+    gotPacket = false; gotFrame = false; decodeFails = 0;
+    seq = 0; shown = 0;
     running = true;
     btnConnect.disabled = true;
     btnDisconnect.disabled = false;
     enableSettings(true);
     setStatus('Connected, waiting for the board...');
+    toast('Connected', 'Waiting for the board to start streaming...', 'ok');
 
     send({ cmd: 'usb', on: true });
     send({ cmd: 'get' });
     beat = setInterval(function () { send({ cmd: 'get' }); }, 2000);   // keeps USB streaming alive
+
     setTimeout(function () {
       if (running && !gotPacket) {
         setStatus('No data yet. Wait ~5 s after the board boots, and check the baud ' +
@@ -368,10 +535,14 @@
     });
   }
 
+  /* ================================================================== */
+  /*  Stats                                                             */
+  /* ================================================================== */
   setInterval(function () {
-    if (!running || !gotPacket) return;
+    if (!running || !gotFrame) return;
     var now = performance.now();
     var dt = (now - tStat) / 1000;
+    if (dt <= 0) return;
     setStatus(canvas.width + 'x' + canvas.height + '  ' +
               (frames / dt).toFixed(1) + ' fps  ' +
               (bytes / 1024 / dt).toFixed(0) + ' KB/s');
