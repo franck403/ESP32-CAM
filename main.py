@@ -25,6 +25,10 @@ BAUD        = 921600    # CH340 link speed; usb_viewer.html must use the same va
 SAFE_S      = 4         # seconds at 115200 after boot: Ctrl-C in this window keeps the normal REPL
 USB_QUALITY = 60        # JPEG quality sent over USB (1..100), changeable from the viewer
 WIFI_FILE   = 'wifi.json'   # written by the viewer; falls back to config.py (ssid, password)
+AP_FILE     = 'ap.json'     # persisted AP credentials
+AP_SSID_DEF = 'ESP32-CAM'   # default AP SSID
+AP_PASS_DEF = '12345678'    # >=8 chars (WPA2); shorter -> open network
+AP_AUTO     = True          # bring the AP up at boot (works alongside STA)
 
 # ===========================================================================
 #  Modes
@@ -87,13 +91,20 @@ print('Camera init: %d ms' % time.ticks_diff(time.ticks_ms(), _t0))
 
 # ===========================================================================
 #  WiFi (non-blocking: the USB link works even when WiFi is not configured)
+#  Three transports can be used at the same time:
+#    USB (CH340), STA (joined to a router), AP (ESP32 acts as its own AP)
 # ===========================================================================
 station = network.WLAN(network.STA_IF)
 station.active(True)
 station.config(pm=station.PM_NONE)
 
+ap = network.WLAN(network.AP_IF)
+
 wifi_ssid = ''
 wifi_up   = False
+ap_ssid   = AP_SSID_DEF
+ap_pass   = AP_PASS_DEF
+ap_up     = False
 srv       = None
 poller    = select.poll()
 
@@ -115,6 +126,25 @@ def load_wifi():
 def save_wifi(ssid, pw):
     with open(WIFI_FILE, 'w') as f:
         json.dump({'ssid': ssid, 'password': pw}, f)
+
+
+def load_ap():
+    global ap_ssid, ap_pass
+    try:
+        with open(AP_FILE) as f:
+            d = json.load(f)
+        ap_ssid = d.get('ssid', AP_SSID_DEF)
+        ap_pass = d.get('password', AP_PASS_DEF)
+    except Exception:
+        pass
+
+
+def save_ap(ssid, pw):
+    try:
+        with open(AP_FILE, 'w') as f:
+            json.dump({'ssid': ssid, 'password': pw}, f)
+    except Exception:
+        pass
 
 
 def wifi_connect(ssid, pw):
@@ -149,13 +179,63 @@ def start_server():
     srv = s
 
 
+def ap_start(ssid=None, pw=None):
+    """Bring up the ESP32 soft-AP. Runs alongside STA (same channel)."""
+    global ap_up, ap_ssid, ap_pass
+    if ssid:
+        ap_ssid = ssid
+    if pw is not None:
+        ap_pass = pw
+    try:
+        ap.active(True)
+        cfg = {'essid': ap_ssid}
+        if len(ap_pass) >= 8:
+            cfg['password'] = ap_pass
+            cfg['authmode'] = network.AUTH_WPA_WPA2_PSK
+        else:
+            cfg['authmode'] = network.AUTH_OPEN
+        ap.config(**cfg)
+        ap_up = True
+        print('AP up: ssid=%s ip=%s' % (ap_ssid, ap.ifconfig()[0]))
+        if srv is None:
+            try:
+                start_server()
+            except OSError as e:
+                print('server start failed:', e)
+        return True
+    except Exception as e:
+        print('AP start failed:', e)
+        ap_up = False
+        return False
+
+
+def ap_stop():
+    global ap_up
+    try:
+        ap.active(False)
+    except Exception:
+        pass
+    ap_up = False
+    print('AP down')
+
+
 def wifi_check():
-    global wifi_up
+    global wifi_up, ap_up
     up = station.isconnected()
     if up and not wifi_up:
-        print('WiFi: http://%s' % station.ifconfig()[0])
+        print('WiFi STA: http://%s' % station.ifconfig()[0])
     wifi_up = up
-    if up and srv is None:
+
+    try:
+        now_ap = ap.active()
+    except Exception:
+        now_ap = False
+    if now_ap != ap_up:
+        ap_up = now_ap
+        if ap_up:
+            print('AP: http://%s' % ap.ifconfig()[0])
+
+    if (up or ap_up) and srv is None:
         try:
             start_server()
         except OSError as e:
@@ -164,6 +244,10 @@ def wifi_check():
 
 _s, _p = load_wifi()
 wifi_connect(_s, _p)
+
+load_ap()
+if AP_AUTO:
+    ap_start()
 
 # ===========================================================================
 #  Viper kernels
@@ -425,6 +509,7 @@ HTML = b"""<!DOCTYPE html>
   canvas{flex:1 1 0;min-height:0;width:100%;object-fit:contain;display:block;
          background:#000;border:1px solid #333;border-radius:6px}
   #status{margin-top:8px;font-size:13px;color:#9aa}
+  #net{margin-top:6px;font-size:12px;color:#789}
 </style>
 </head>
 <body>
@@ -452,6 +537,7 @@ HTML = b"""<!DOCTYPE html>
   </div>
   <canvas id="c" width="320" height="240"></canvas>
   <div id="status">Connecting&hellip;</div>
+  <div id="net"></div>
 </div>
 <script>
 (function () {
@@ -768,6 +854,18 @@ HTML = b"""<!DOCTYPE html>
     requestAnimationFrame(tick);
   })();
 
+  // ---- network banner (STA / AP) ----------------------------------------
+  (function netTick() {
+    fetch('/net', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+      var p = [];
+      if (d.sta_up) p.push('STA ' + d.sta_ssid + ' ' + d.sta_ip + ' (' + d.rssi + ' dBm)');
+      if (d.ap_up)  p.push('AP '  + d.ap_ssid  + ' ' + d.ap_ip);
+      if (!p.length) p.push('No WiFi');
+      document.getElementById('net').textContent = p.join('  |  ');
+    }).catch(function () {});
+    setTimeout(netTick, 5000);
+  })();
+
   fmtSel.addEventListener('change', function () {
     wantedFormat = fmtSel.value;
     statusEl.textContent = 'Switching to ' + fmtSel.options[fmtSel.selectedIndex].text + '...';
@@ -971,6 +1069,9 @@ def usb_send_status():
         'wifi': up,
         'ip': station.ifconfig()[0] if up else '',
         'rssi': rssi() if up else 0,
+        'ap': ap_up,
+        'ap_ssid': ap_ssid,
+        'ap_ip': ap.ifconfig()[0] if ap_up else '',
     })
 
 
@@ -1008,6 +1109,14 @@ def handle_cmd(c):
             p = c.get('password') or ''
             save_wifi(s, p)
             wifi_connect(s, p)
+    elif cmd == 'ap':
+        if c.get('on'):
+            s = c.get('ssid') or ap_ssid
+            p = c.get('password') if 'password' in c else ap_pass
+            save_ap(s, p or '')
+            ap_start(s, p)
+        else:
+            ap_stop()
     elif cmd == 'mode':
         m = c.get('mode')
         if m == 'free':
@@ -1142,6 +1251,25 @@ def handle_new(c):
             streams.append(c)
             force_full = True
             return
+        except OSError:
+            pass
+    elif b'GET /net' in req:
+        up = station.isconnected()
+        info = json.dumps({
+            'sta_up':   up,
+            'sta_ip':   station.ifconfig()[0] if up else '',
+            'sta_ssid': wifi_ssid,
+            'rssi':     rssi() if up else 0,
+            'ap_up':    ap_up,
+            'ap_ssid':  ap_ssid,
+            'ap_ip':    ap.ifconfig()[0] if ap_up else '',
+        }).encode()
+        try:
+            c.settimeout(3.0)
+            c.sendall(
+                b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n'
+                b'Content-Length: %d\r\nCache-Control: no-store\r\n'
+                b'Connection: close\r\n\r\n' % len(info) + info)
         except OSError:
             pass
     elif b'GET / ' in req or b'GET /index' in req:
