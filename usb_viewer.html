@@ -175,13 +175,25 @@
       }
     }, 'image/jpeg', 0.9);
   });
+function renderBrickognizeResults(data) {
+  var items = data.items || data.predictions || (Array.isArray(data) ? data : []);
+  if (!items.length) {
+    blPanel.innerHTML = '<b>BrickLink API Results:</b> No matching pieces found.';
+    return;
+  }
 
-  function renderBrickognizeResults(data) {
-    var items = data.items || data.predictions || (Array.isArray(data) ? data : []);
-    if (!items.length) {
-      blPanel.innerHTML = '<b>BrickLink API Results:</b> No matching pieces found.';
-      return;
-    }
+  var html = '<b>BrickLink API Matches:</b><ul>';
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var name = item.name || (item.item && item.item.name) || 'Unknown Part';
+    var no = item.no || (item.item && item.item.no) || item.id || (item.external_ids && item.external_ids.BrickLink && item.external_ids.BrickLink[0]) || '';
+    var score = item.score ? Math.round(item.score * 100) : 0;
+    var blUrl = no ? 'https://www.bricklink.com/v2/catalog/catalogitem.page?P=' + encodeURIComponent(no) : 'https://www.bricklink.com';
+    html += '<li><b>' + name + '</b> (' + (no || 'N/A') + ') - ' + score + '% - <a href="' + blUrl + '" target="_blank">View on BrickLink &raquo;</a></li>';
+  }
+  html += '</ul>';
+  blPanel.innerHTML = html;
+}
 
     var html = '<b>BrickLink API Matches:</b><ul>';
     for (var i = 0; i < items.length; i++) {
