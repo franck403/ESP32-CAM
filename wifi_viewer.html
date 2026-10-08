@@ -36,7 +36,7 @@
 </nav>
 
 <div class="page wide">
-  <div id="warn" class="notice warn" hidden></div>
+  <div id="warn" class="notice" hidden></div>
 
   <div class="card conn">
     <label class="field grow"><span>Board IP</span>
@@ -200,21 +200,8 @@ $('snap').addEventListener('click', () => {
 function updateWarn() {
   const w = $('warn');
   if (location.protocol !== 'https:') { w.hidden = true; return; }
-  const h = cleanHost($('ip').value);
   w.hidden = false;
-  w.textContent = 'This page is on HTTPS, so the browser will probably block the http:// stream from the board. ' +
-    'Open this viewer over http:// or from a local file, allow "Insecure content" for this site ' +
-    '(lock icon > Site settings), or use the board\'s own page: ';
-  if (h) {
-    const a = document.createElement('a');
-    a.href = 'http://' + h + '/';
-    a.target = '_blank';
-    a.rel = 'noopener';
-    a.textContent = 'http://' + h + '/';
-    w.appendChild(a);
-  } else {
-    w.appendChild(document.createTextNode('http://<board ip>/'));
-  }
+  w.textContent = 'The browser will ask the site to use local devices. Click Allow.';
 }
 $('ip').addEventListener('input', updateWarn);
 
@@ -381,7 +368,7 @@ setInterval(() => {
     } else if (fails >= 2) {
       setChip('err', 'Unreachable');
       statusEl.textContent = 'Cannot reach http://' + host + '/ . Check the IP, that you are on the same network ' +
-        '(or the ESP32-CAM hotspot), and the HTTPS note above.';
+        '(or the ESP32-CAM hotspot), and allow local device access when the browser asks.';
     }
   }
   if (now - lastData > 5000) { lastData = now; run(); }     // stalled stream: restart
