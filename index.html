@@ -300,6 +300,7 @@
     await sleep(200);
     await write('\x04');
     await sleep(600);
+    rx = '';
   }
 
   async function rawExec(code, timeout) {
@@ -337,10 +338,11 @@
     var t0 = performance.now(), sta = '', ap = '', m;
     var reSta = /"ip"\s*:\s*"(\d{1,3}(?:\.\d{1,3}){3})"/;
     var reAp = /"ap_ip"\s*:\s*"(\d{1,3}(?:\.\d{1,3}){3})"/;
+    var reLine = /WiFi STA: http:\/\/(\d{1,3}(?:\.\d{1,3}){3})/;
     while (performance.now() - t0 < timeoutMs && !sta) {
       await write(JSON.stringify({ cmd: 'get' }) + '\n');
       await sleep(900);
-      m = reSta.exec(rx);
+      m = reSta.exec(rx) || reLine.exec(rx);
       if (m) sta = m[1];
       m = reAp.exec(rx);
       if (m) ap = m[1];
@@ -368,10 +370,23 @@
   async function rebootAndProbe(timeoutMs) {
     log('Restarting the board...');
     await softReboot();
-    await releasePort();
     log('Waiting for it to boot and join WiFi (up to ' + Math.round(timeoutMs / 1000) + ' s)...');
-    await sleep(6500);
-    await openPort(230400, true);
+    // main.py announces its USB mode: normal (stay at 115200) or fast (UART moves to N baud after ~4 s)
+    var t0 = performance.now(), m = null;
+    while (performance.now() - t0 < 25000) {
+      m = /USB: (?:normal mode|switching to (\d+) baud)/.exec(rx);
+      if (m) break;
+      await sleep(100);
+    }
+    if (m && m[1]) {
+      log('Board is in fast USB mode (' + m[1] + ' baud): reconnecting at that speed.');
+      await releasePort();
+      await sleep(5500);
+      await openPort(parseInt(m[1], 10), true);
+    } else {
+      log('Board is in normal mode (115200).');
+      await sleep(300);
+    }
     reportIp(await probeIp(timeoutMs));
   }
 

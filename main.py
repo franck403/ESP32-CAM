@@ -22,6 +22,7 @@ except ImportError:
 #  Settings
 # ===========================================================================
 BAUD        = 230400    # CH340 link speed; usb_viewer.html must use the same value
+USB_FAST    = False     # False: stay on the normal 115200 REPL console (USB viewer works over it). True: after SAFE_S switch UART0 to BAUD (fast, but no normal REPL)
 SAFE_S      = 4         # seconds at 115200 after boot: Ctrl-C in this window keeps the normal REPL
 USB_QUALITY = 60        # JPEG quality sent over USB (1..100), changeable from the viewer
 WIFI_FILE   = 'wifi.json'   # written by the viewer; falls back to config.py (ssid, password)
@@ -1362,6 +1363,11 @@ def usb_poll():
 def enter_fast_usb():
     """After a short safe window at 115200, move UART0 to BAUD for the USB link."""
     global uart, stdin_poll
+    if not USB_FAST:
+        stdin_poll = select.poll()
+        stdin_poll.register(sys.stdin, select.POLLIN)
+        print('USB: normal mode (115200), REPL kept')
+        return
     print('USB: switching to %d baud in %d s (Ctrl-C now keeps the normal REPL)' % (BAUD, SAFE_S))
     for _ in range(SAFE_S * 10):
         time.sleep_ms(100)
