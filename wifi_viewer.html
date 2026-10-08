@@ -445,7 +445,7 @@ onEngine();
 
 const aiProg = $('aiProg'), aiMsg = $('aiMsg');
 let tf = null;
-const pipes = {};
+let curKey = '', curPipe = null;     // only ONE model stays in memory: loading another frees the previous one
 let busy = false;
 
 async function loadTf() {
@@ -466,16 +466,23 @@ function onProgress(p) {
 
 async function getPipe(task, model, device) {
   const key = task + '|' + model + '|' + device;
-  if (pipes[key]) return pipes[key];
+  if (curPipe && curKey === key) return curPipe;
+  if (curPipe) {                                   // free the previous model before loading the next
+    aiMsg.textContent = 'Freeing the previous model...';
+    try { await curPipe.dispose(); } catch (e) {}
+    curPipe = null; curKey = '';
+    await new Promise((r) => setTimeout(r, 150));
+  }
   const T = await loadTf();
   aiMsg.textContent = 'Loading model ' + model + '...';
-  pipes[key] = await T.pipeline(task, model, {
+  curPipe = await T.pipeline(task, model, {
     device: device,
     dtype: device === 'webgpu' ? 'fp32' : 'q8',
     progress_callback: onProgress
   });
+  curKey = key;
   aiProg.hidden = true;
-  return pipes[key];
+  return curPipe;
 }
 
 function parseLabels() {
