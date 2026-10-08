@@ -13,8 +13,9 @@
   .grp input[type=number]{width:90px}
   .grp input[type=text],.grp input[type=password]{width:150px}
 </style>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
 <script>
-/* Kill the Netlify "hud" badge as early as possible. */
 (function () {
   function killBadge() {
     try {
@@ -68,6 +69,7 @@
       </label>
       <label class="check"><input type="checkbox" id="smooth" checked> Smooth</label>
       <span class="spacer"></span>
+      <button id="aiToggle">AI: OFF</button>
       <button id="snap">Snapshot</button>
       <button id="full">Fullscreen</button>
     </div>
@@ -142,7 +144,49 @@
   var MAX_JPEG = 2 * 1024 * 1024;
   var textEnc = new TextEncoder(), textDec = new TextDecoder();
 
-  /* ==================== toasts ==================== */
+  var aiModel = null;
+  var aiEnabled = false;
+  var aiRunning = false;
+  var lastDetections = [];
+
+  $('aiToggle').addEventListener('click', async function () {
+    aiEnabled = !aiEnabled;
+    $('aiToggle').textContent = aiEnabled ? 'AI: ON' : 'AI: OFF';
+    if (aiEnabled && !aiModel) {
+      toast('AI Model', 'Loading COCO-SSD model...', 'ok');
+      try {
+        aiModel = await cocoSsd.load();
+        toast('AI Model', 'Model loaded successfully', 'ok');
+      } catch (e) {
+        aiEnabled = false;
+        $('aiToggle').textContent = 'AI: OFF';
+        toast('AI Model Error', e.message, 'err');
+      }
+    }
+  });
+
+  async function runAI() {
+    if (!aiEnabled || !aiModel || aiRunning || canvas.width === 0 || canvas.height === 0) return;
+    aiRunning = true;
+    try {
+      lastDetections = await aiModel.detect(canvas);
+    } catch (e) {}
+    aiRunning = false;
+  }
+
+  function drawDetections() {
+    if (!aiEnabled || !lastDetections.length) return;
+    ctx.strokeStyle = '#00ffcc';
+    ctx.lineWidth = 2;
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = '#00ffcc';
+    for (var i = 0; i < lastDetections.length; i++) {
+      var d = lastDetections[i];
+      ctx.strokeRect(d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3]);
+      ctx.fillText(d.class + ' (' + Math.round(d.score * 100) + '%)', d.bbox[0] + 4, d.bbox[1] + 14);
+    }
+  }
+
   var lastToastKey = '', lastToastAt = 0;
   function toast(title, msg, kind) {
     msg = String(msg == null ? '' : msg);
@@ -164,7 +208,6 @@
     }, kind === 'err' ? 9000 : 5500);
   }
 
-  /* ==================== view ==================== */
   function applyView() {
     canvas.style.imageRendering = smoothEl.checked ? 'auto' : 'pixelated';
     var cw = canvas.width || 1, ch = canvas.height || 1;
@@ -200,10 +243,8 @@
     }, 'image/png');
   });
 
-  /* ==================== commands ==================== */
   async function send(obj) {
     if (!writer) return;
-    console.log('[serial tx]', obj);
     try { await writer.write(textEnc.encode(JSON.stringify(obj) + '\n')); } catch (e) {}
   }
   function enableSettings(on) { settingBtns.forEach(function (id) { $(id).disabled = !on; }); }
@@ -228,11 +269,9 @@
     }, 300);
   });
 
-  /* ==================== board JSON status ==================== */
   var warnedNoJpeg = false;
   function onMsg(m) {
     if (!m || typeof m !== 'object') return;
-    console.log('[board msg]', m);
     if (m.t === 'status') {
       var wifi = m.wifi
         ? ('WiFi ' + m.ssid + '  http://' + m.ip + '  ' + m.rssi + ' dBm')
@@ -245,8 +284,7 @@
       if (document.activeElement !== $('s_ssid') && !$('s_ssid').value && m.ssid) $('s_ssid').value = m.ssid;
       if (!m.jpeg && !warnedNoJpeg) {
         warnedNoJpeg = true;
-        toast('No JPEG encoder on the board',
-              'This firmware has no "jpeg" module, so no frames can be sent over USB.', 'err');
+        toast('No JPEG encoder on the board', 'This firmware has no "jpeg" module, so no frames can be sent over USB.', 'err');
       }
     } else if (m.t === 'error') {
       boardEl.textContent = 'Board error: ' + m.msg;
@@ -254,7 +292,6 @@
     }
   }
 
-  /* ==================== parser ==================== */
   var buf  = new Uint8Array(1 << 16), blen = 0;
   var trash = new Uint8Array(8192), trashLen = 0, trashTimer = null;
 
@@ -293,8 +330,6 @@
   }
 
   var lastTextToast = 0, textToastStreak = 0, warnedNoise = false;
-
-  /* known periodic / boot lines that we never want as a toast */
   var RE_STATS   = /^[A-Za-z0-9_]+:\s*[\d.]+\s*fps\s*\|\s*cap\s*\d+\s*enc\s*\d+\s*send\s*\d+\s*ms\s*\|\s*\d+\s*B\/frame\s*\|\s*level\s+[\w.]+\s*\|\s*rssi\s*-?\d+\s*dBm\s*$/;
   var RE_BOOT    = /^(USB:|WiFi:|Camera init:|Frame:|Switching mode|Now:|Adopting real frame:|Stopped|Board )/;
 
@@ -302,7 +337,6 @@
     if (!trashLen) return;
     var n = trashLen;
     trashLen = 0;
-
     var printable = 0, s = '';
     for (var i = 0; i < n; i++) {
       var b = trash[i];
@@ -313,53 +347,34 @@
     if (printable < 4 || printable < n * 0.85) return;
     var txt = s.replace(/\s+/g, ' ').trim();
     if (!txt || !/[A-Za-z0-9]/.test(txt)) return;
-    console.log('[serial text]', txt);
 
-    /* 1. periodic WiFi stats line: silently swallow, but track it, because
-          it is only printed by the board when usb_on is False.  If we keep
-          seeing it, USB streaming never engaged. */
     if (RE_STATS.test(txt)) {
       statsSeen++;
       if (statsSeen === 3) {
-        toast('USB streaming not engaged',
-              'The board is printing its WiFi stats line to the serial console, ' +
-              'which means it never received the "usb on" command. Try Disconnect ' +
-              'then Connect again, and confirm the baud matches what the board ' +
-              'printed at boot (115200 if fast UART failed).',
-              'err');
+        toast('USB streaming not engaged', 'The board is printing its WiFi stats line to the serial console.', 'err');
       }
       return;
     }
 
-    /* 2. garbled UART data */
     var dots = 0, alnum = 0, vowels = 0;
     for (var k = 0; k < txt.length; k++) {
       var c = txt.charAt(k);
       if (c === '\u00b7') dots++;
       if (/[A-Za-z0-9]/.test(c)) { alnum++; if (/[aeiouAEIOU]/.test(c)) vowels++; }
     }
-    var garbled = (dots > txt.length * 0.10) ||
-                  (txt.length >= 8 && alnum < txt.length * 0.35) ||
-                  (alnum >= 12 && vowels === 0);
+    var garbled = (dots > txt.length * 0.10) || (txt.length >= 8 && alnum < txt.length * 0.35) || (alnum >= 12 && vowels === 0);
     if (garbled) {
       if (!warnedNoise) {
         warnedNoise = true;
-        toast('Ignoring garbled UART data',
-              'The board appears to be sending data at a different baud rate ' +
-              'than the viewer. Try matching the value the board printed at boot.',
-              'text');
+        toast('Ignoring garbled UART data', 'The board appears to be sending data at a different baud rate.', 'text');
       }
       return;
     }
 
-    /* 3. dedupe identical strings */
     if (seenTexts[txt]) return;
     seenTexts[txt] = true;
-
-    /* 4. boot lines: keep, but only once */
     if (RE_BOOT.test(txt)) { toast('Board', txt, 'text'); return; }
 
-    /* 5. other text: throttle */
     var now = Date.now();
     if (now - lastTextToast < 1500) textToastStreak++; else textToastStreak = 0;
     lastTextToast = now;
@@ -386,15 +401,18 @@
           applyView();
         }
         ctx.drawImage(bmp, 0, 0);
+        drawDetections();
         frames++;
         gotFrame = true;
+        if (aiEnabled && aiModel) {
+          runAI();
+        }
       }
       bmp.close();
     }, function (err) {
       decodeFails++;
       if (decodeFails === 1 || decodeFails % 120 === 0) {
-        toast('JPEG decode failed',
-              (err && err.message ? err.message : String(err)) + '  (' + decodeFails + ' frames)', 'err');
+        toast('JPEG decode failed', (err && err.message ? err.message : String(err)) + '  (' + decodeFails + ' frames)', 'err');
       }
     });
   }
@@ -438,7 +456,6 @@
     }
   }
 
-  /* ==================== serial ==================== */
   async function readLoop() {
     while (running && port && port.readable) {
       reader = port.readable.getReader();
@@ -488,9 +505,6 @@
     setStatus('Connected, waiting for the board...');
     toast('Connected', 'Waiting for the board to start streaming...', 'ok');
 
-    /* Belt and braces: repeat "usb on" a few times, spaced out, so it survives
-       the board's SAFE_S window (4 s of blocking sleeps at boot) and any byte
-       that is dropped on a slow link. */
     (function retryUsb() {
       if (!running) return;
       send({ cmd: 'usb', on: true });
@@ -504,8 +518,7 @@
 
     setTimeout(function () {
       if (running && !gotPacket) {
-        setStatus('No data yet. Wait ~5 s after the board boots, and check that the ' +
-                  'baud here matches the board (115200 if it printed "fast UART failed").');
+        setStatus('No data yet. Wait ~5 s after the board boots.');
       }
     }, 5000);
 
@@ -541,16 +554,13 @@
     });
   }
 
-  /* ==================== status line ==================== */
   setInterval(function () {
     if (!running) return;
     var now = performance.now();
     var dt = (now - tStat) / 1000;
     if (dt <= 0) return;
     if (gotFrame) {
-      setStatus(canvas.width + 'x' + canvas.height + '  ' +
-                (frames / dt).toFixed(1) + ' fps  ' +
-                (bytes / 1024 / dt).toFixed(0) + ' KB/s');
+      setStatus(canvas.width + 'x' + canvas.height + '  ' + (frames / dt).toFixed(1) + ' fps  ' + (bytes / 1024 / dt).toFixed(0) + ' KB/s');
     } else if (bytes > 0) {
       var kb = (bytes / 1024 / dt).toFixed(0);
       var extra = pktCount > 0 ? '  (' + pktCount + ' packets, no frames)' : '  (no valid packets yet)';
