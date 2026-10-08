@@ -88,6 +88,8 @@
 
       <progress id="aiProg" max="100" value="0" hidden></progress>
       <div id="aiMsg"></div>
+      <div id="aiInfo" class="small muted"></div>
+      <pre id="aiLog" class="log" style="max-height:140px;font-size:11.5px">Click a button above: every step (library, download, model, result) is listed here.</pre>
       <canvas id="aiCanvas" hidden></canvas>
       <ul id="aiList"></ul>
 
@@ -448,33 +450,68 @@ let tf = null;
 let curKey = '', curPipe = null;     // only ONE model stays in memory: loading another frees the previous one
 let busy = false;
 
+let aiLogLines = [];
+const aiLogEl = $('aiLog');
+function aiLog(m) {
+  console.log('[ai]', m);
+  aiLogLines.push(new Date().toLocaleTimeString() + '  ' + m);
+  if (aiLogLines.length > 80) aiLogLines.shift();
+  aiLogEl.textContent = aiLogLines.join('\n');
+  aiLogEl.scrollTop = aiLogEl.scrollHeight;
+}
+
 async function loadTf() {
   if (tf) return tf;
+  const t0 = performance.now();
   aiMsg.textContent = 'Loading AI library...';
-  tf = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3');
+  aiLog('Loading the AI library from cdn.jsdelivr.net (Transformers.js)...');
+  try {
+    tf = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3');
+  } catch (e) {
+    throw new Error('Could not load the AI library (network blocked?): ' + (e && e.message ? e.message : e));
+  }
   tf.env.allowLocalModels = false;
+  aiLog('AI library loaded in ' + ((performance.now() - t0) / 1000).toFixed(1) + ' s');
   return tf;
 }
 
+const dl = {};     // file -> { loaded, total, step } for the model being loaded
+const mb = (n) => (n / 1048576).toFixed(1);
 function onProgress(p) {
-  if (p && p.status === 'progress' && typeof p.progress === 'number') {
+  if (!p) return;
+  const f = p.file || p.name || 'model';
+  if (p.status === 'initiate') {
+    aiLog('Fetching ' + f);
+  } else if (p.status === 'progress') {
+    const d = dl[f] || (dl[f] = { loaded: 0, total: 0, step: -1 });
+    d.loaded = p.loaded || 0; d.total = p.total || 0;
     aiProg.hidden = false;
-    aiProg.value = p.progress;
-    aiMsg.textContent = 'Downloading ' + (p.file || 'model') + ' ' + Math.round(p.progress) + '%';
+    aiProg.value = p.progress || 0;
+    aiMsg.textContent = 'Downloading ' + f.split('/').pop() + '  ' + mb(d.loaded) + ' / ' + mb(d.total) + ' MB (' + Math.round(p.progress || 0) + '%)';
+    const step = Math.floor((p.progress || 0) / 25);
+    if (step !== d.step) { d.step = step; aiLog('  ' + f.split('/').pop() + ': ' + mb(d.loaded) + ' / ' + mb(d.total) + ' MB'); }
+  } else if (p.status === 'done') {
+    aiLog('Downloaded ' + f);
+  } else if (p.status === 'ready') {
+    aiLog('Model ready in memory');
   }
 }
 
 async function getPipe(task, model, device) {
   const key = task + '|' + model + '|' + device;
-  if (curPipe && curKey === key) return curPipe;
+  if (curPipe && curKey === key) { aiLog('Model already loaded: ' + model); return curPipe; }
   if (curPipe) {                                   // free the previous model before loading the next
     aiMsg.textContent = 'Freeing the previous model...';
+    aiLog('Freeing the previous model...');
     try { await curPipe.dispose(); } catch (e) {}
     curPipe = null; curKey = '';
     await new Promise((r) => setTimeout(r, 150));
   }
   const T = await loadTf();
+  for (const k in dl) delete dl[k];
+  const t0 = performance.now();
   aiMsg.textContent = 'Loading model ' + model + '...';
+  aiLog('Loading model ' + model + ' (' + task + ', ' + (device === 'webgpu' ? 'GPU fp32' : 'CPU q8') + ')...');
   curPipe = await T.pipeline(task, model, {
     device: device,
     dtype: device === 'webgpu' ? 'fp32' : 'q8',
@@ -482,6 +519,11 @@ async function getPipe(task, model, device) {
   });
   curKey = key;
   aiProg.hidden = true;
+  const total = Object.keys(dl).reduce((a, k) => a + (dl[k].total || 0), 0);
+  const secs = ((performance.now() - t0) / 1000).toFixed(1);
+  $('aiInfo').textContent = 'Model: ' + model + '  |  ' + task + '  |  ' + (device === 'webgpu' ? 'GPU fp32' : 'CPU q8') +
+    '  |  loaded in ' + secs + ' s  |  ' + (total ? mb(total) + ' MB downloaded' : 'from browser cache');
+  aiLog('Model loaded in ' + secs + ' s (' + (total ? mb(total) + ' MB downloaded' : 'from browser cache') + ')');
   return curPipe;
 }
 
@@ -526,20 +568,20 @@ async function brickognize(url) {
 
 async function runEngine(key, url) {
   const e = ENGINES[key], dev = $('device').value;
-  if (e.kind === 'brickognize') { aiMsg.textContent = 'Asking Brickognize...'; return brickognize(url); }
+  if (e.kind === 'brickognize') { aiMsg.textContent = 'Asking Brickognize...'; aiLog('Sending the frame to api.brickognize.com...'); return brickognize(url); }
   if (e.kind === 'detect') {
     const p = await getPipe(e.task, e.model, dev);
-    aiMsg.textContent = 'Analyzing...';
+    aiMsg.textContent = 'Analyzing...'; aiLog('Running the model on the frame...');
     return normalize(await p(url, { threshold: 0.5, percentage: true }));
   }
   if (e.kind === 'caption') {
     const p = await getPipe(e.task, e.model, dev);
-    aiMsg.textContent = 'Analyzing...';
+    aiMsg.textContent = 'Analyzing...'; aiLog('Running the model on the frame...');
     return normalize(await p(url, { max_new_tokens: 40 }));
   }
   if (e.kind === 'clip') {
     const p = await getPipe(e.task, e.model, dev);
-    aiMsg.textContent = 'Analyzing...';
+    aiMsg.textContent = 'Analyzing...'; aiLog('Running the model on the frame...');
     const out = await p(url, parseLabels(), { hypothesis_template: e.template });
     return normalize(out).sort((a, b) => b.score - a.score).slice(0, 5);
   }
@@ -547,7 +589,7 @@ async function runEngine(key, url) {
   if (!model) throw new Error('Enter a model id (Advanced).');
   lsSet('esp32cam.cmodel', model);
   const p = await getPipe(task, model, dev);
-  aiMsg.textContent = 'Analyzing...';
+  aiMsg.textContent = 'Analyzing...'; aiLog('Running the model on the frame...');
   let out;
   if (task === 'object-detection') out = await p(url, { threshold: 0.5, percentage: true });
   else if (task === 'zero-shot-image-classification') out = await p(url, parseLabels());
@@ -614,8 +656,13 @@ function showError(msg) {
 }
 
 async function analyze() {
-  if (busy) return;
-  if (!gotFrame) { showError('No frame yet: connect to the board first.'); return; }
+  if (busy) { aiLog('Still working on the previous request...'); return; }
+  aiLogLines = [];
+  if (!gotFrame) {
+    showError('No frame yet: connect to the board first.');
+    aiLog('No frame yet: connect to the board first.');
+    return;
+  }
   busy = true;
   $('analyze').disabled = true;
   document.querySelectorAll('.preset').forEach((b) => { b.disabled = true; });
@@ -623,15 +670,30 @@ async function analyze() {
   snap.width = canvas.width; snap.height = canvas.height;
   snap.getContext('2d').drawImage(canvas, 0, 0);
   const url = snap.toDataURL('image/jpeg', 0.92);
+  const key = engineSel.value;
+  aiLog('Engine: ' + ENGINES[key].label);
+  aiLog('Frame ' + snap.width + 'x' + snap.height + ' captured');
+  aiMsg.textContent = 'Starting...';
   const t0 = performance.now();
+  const tick = setInterval(() => {              // elapsed time while nothing is downloading
+    if (!aiProg.hidden) return;
+    aiMsg.textContent = aiMsg.textContent.replace(/\s*\(\d+ s\)$/, '') + ' (' + Math.round((performance.now() - t0) / 1000) + ' s)';
+  }, 1000);
   try {
-    const items = await runEngine(engineSel.value, url);
+    const items = await runEngine(key, url);
     showResults(items, snap);
-    aiMsg.textContent = 'Done in ' + ((performance.now() - t0) / 1000).toFixed(1) + ' s';
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    aiLog('Done in ' + secs + ' s: ' + (items.length
+      ? items.slice(0, 3).map((i) => i.label + (i.score != null ? ' ' + Math.round(i.score * 100) + '%' : '')).join(' | ')
+      : 'nothing found'));
+    aiMsg.textContent = 'Done in ' + secs + ' s';
   } catch (e) {
-    showError('AI error: ' + (e && e.message ? e.message : e));
+    const m = e && e.message ? e.message : String(e);
+    showError('AI error: ' + m);
+    aiLog('ERROR: ' + m);
     aiMsg.textContent = '';
   } finally {
+    clearInterval(tick);
     aiProg.hidden = true;
     busy = false;
     $('analyze').disabled = false;
