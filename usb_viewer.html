@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ESP32 USB Camera</title>
+<title>ESP32 USB Camera - BrickLink AI</title>
 <link rel="stylesheet" href="ui.css">
 <style>
   #status{font-size:13px;white-space:normal;max-width:100%;border-radius:10px}
@@ -12,6 +12,8 @@
   .grp{display:flex;gap:8px;align-items:flex-end}
   .grp input[type=number]{width:90px}
   .grp input[type=text],.grp input[type=password]{width:150px}
+  #blPanel{margin-top:10px;background:#1e1e1e;padding:10px;border-radius:8px;font-size:12px;color:#fff;display:none}
+  #blPanel a{color:#4da3ff;text-decoration:none}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
@@ -57,6 +59,7 @@
 
   <section class="card flush">
     <div class="stage" id="stage"><canvas id="c" width="320" height="240"></canvas></div>
+    <div id="blPanel"></div>
     <div class="toolbar">
       <label class="check">Scale
         <select id="scale">
@@ -69,7 +72,7 @@
       </label>
       <label class="check"><input type="checkbox" id="smooth" checked> Smooth</label>
       <span class="spacer"></span>
-      <button id="aiToggle">AI: OFF</button>
+      <button id="aiToggle">BrickLink AI: OFF</button>
       <button id="snap">Snapshot</button>
       <button id="full">Fullscreen</button>
     </div>
@@ -137,6 +140,7 @@
   var statusEl = $('status');
   var boardEl  = $('board');
   var toastsEl = $('toasts');
+  var blPanel  = $('blPanel');
   var btnConnect = $('connect'), btnDisconnect = $('disconnect');
   var baudEl = $('baud'), scaleEl = $('scale'), smoothEl = $('smooth');
   var settingBtns = ['a_mode', 'a_q', 'a_usbq', 'a_wifi', 'a_repl', 'a_reboot'];
@@ -151,16 +155,18 @@
 
   $('aiToggle').addEventListener('click', async function () {
     aiEnabled = !aiEnabled;
-    $('aiToggle').textContent = aiEnabled ? 'AI: ON' : 'AI: OFF';
+    $('aiToggle').textContent = aiEnabled ? 'BrickLink AI: ON' : 'BrickLink AI: OFF';
+    blPanel.style.display = aiEnabled ? 'block' : 'none';
     if (aiEnabled && !aiModel) {
-      toast('AI Model', 'Loading COCO-SSD model...', 'ok');
+      toast('BrickLink AI', 'Loading recognition model...', 'ok');
       try {
         aiModel = await cocoSsd.load();
-        toast('AI Model', 'Model loaded successfully', 'ok');
+        toast('BrickLink AI', 'Model loaded successfully', 'ok');
       } catch (e) {
         aiEnabled = false;
-        $('aiToggle').textContent = 'AI: OFF';
-        toast('AI Model Error', e.message, 'err');
+        $('aiToggle').textContent = 'BrickLink AI: OFF';
+        blPanel.style.display = 'none';
+        toast('AI Error', e.message, 'err');
       }
     }
   });
@@ -170,16 +176,33 @@
     aiRunning = true;
     try {
       lastDetections = await aiModel.detect(canvas);
+      updateBrickLinkPanel();
     } catch (e) {}
     aiRunning = false;
   }
 
+  function updateBrickLinkPanel() {
+    if (!lastDetections.length) {
+      blPanel.innerHTML = 'BrickLink AI: No items detected.';
+      return;
+    }
+    var html = '<b>BrickLink Matches:</b><ul>';
+    for (var i = 0; i < lastDetections.length; i++) {
+      var item = lastDetections[i];
+      var query = encodeURIComponent(item.class);
+      var blUrl = 'https://www.bricklink.com/v2/catalog/catalogitem.page?q=' + query;
+      html += '<li>' + item.class + ' (' + Math.round(item.score * 100) + '%) - <a href="' + blUrl + '" target="_blank">Search on BrickLink &raquo;</a></li>';
+    }
+    html += '</ul>';
+    blPanel.innerHTML = html;
+  }
+
   function drawDetections() {
     if (!aiEnabled || !lastDetections.length) return;
-    ctx.strokeStyle = '#00ffcc';
+    ctx.strokeStyle = '#ff9900';
     ctx.lineWidth = 2;
     ctx.font = '12px sans-serif';
-    ctx.fillStyle = '#00ffcc';
+    ctx.fillStyle = '#ff9900';
     for (var i = 0; i < lastDetections.length; i++) {
       var d = lastDetections[i];
       ctx.strokeRect(d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3]);
