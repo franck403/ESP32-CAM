@@ -203,6 +203,7 @@
   /* ==================== commands ==================== */
   async function send(obj) {
     if (!writer) return;
+    console.log('[serial tx]', obj);
     try { await writer.write(textEnc.encode(JSON.stringify(obj) + '\n')); } catch (e) {}
   }
   function enableSettings(on) { settingBtns.forEach(function (id) { $(id).disabled = !on; }); }
@@ -231,6 +232,7 @@
   var warnedNoJpeg = false;
   function onMsg(m) {
     if (!m || typeof m !== 'object') return;
+    console.log('[board msg]', m);
     if (m.t === 'status') {
       var wifi = m.wifi
         ? ('WiFi ' + m.ssid + '  http://' + m.ip + '  ' + m.rssi + ' dBm')
@@ -311,6 +313,7 @@
     if (printable < 4 || printable < n * 0.85) return;
     var txt = s.replace(/\s+/g, ' ').trim();
     if (!txt || !/[A-Za-z0-9]/.test(txt)) return;
+    console.log('[serial text]', txt);
 
     /* 1. periodic WiFi stats line: silently swallow, but track it, because
           it is only printed by the board when usb_on is False.  If we keep

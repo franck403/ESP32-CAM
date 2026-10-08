@@ -210,7 +210,9 @@
           for (;;) {
             var r = await reader.read();
             if (r.done) break;
-            rx += dec.decode(r.value, { stream: true });
+            var txt = dec.decode(r.value, { stream: true });
+            console.log('[serial rx]', JSON.stringify(txt));
+            rx += txt;
             if (rx.length > 65536) rx = rx.slice(-8192);
           }
         } catch (e) {
@@ -245,7 +247,10 @@
     port = null;
   }
 
-  async function write(str) { await writer.write(enc.encode(str)); }
+  async function write(str) {
+    console.log('[serial tx]', JSON.stringify(str.length > 200 ? str.slice(0, 200) + '...(' + str.length + ' chars)' : str));
+    await writer.write(enc.encode(str));
+  }
 
   async function writePaced(str) {          // small slices: the board has a tiny RX buffer
     for (var i = 0; i < str.length; i += 128) {
