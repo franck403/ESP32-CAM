@@ -326,7 +326,7 @@
   }
 
   // ---- find the board IP over USB -------------------------------------------
-  // The freshly booted main.py moves to 921600 baud ~5 s after boot and answers
+  // The freshly booted main.py moves to 230400 baud ~5 s after boot and answers
   // {"cmd":"get"} with a status packet holding "ip" (STA) and "ap_ip" (AP).
   async function probeIp(timeoutMs) {
     var t0 = performance.now(), sta = '', ap = '', m;
@@ -359,14 +359,14 @@
     }
   }
 
-  // Port is open at 115200 and the board is in raw REPL: restart it cleanly, switch to 921600, read the IP.
+  // Port is open at 115200 and the board is in raw REPL: restart it cleanly, switch to 230400, read the IP.
   async function rebootAndProbe(timeoutMs) {
     log('Restarting the board...');
     await softReboot();
     await releasePort();
     log('Waiting for it to boot and join WiFi (up to ' + Math.round(timeoutMs / 1000) + ' s)...');
     await sleep(6500);
-    await openPort(921600, true);
+    await openPort(230400, true);
     reportIp(await probeIp(timeoutMs));
   }
 

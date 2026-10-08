@@ -21,7 +21,7 @@ except ImportError:
 # ===========================================================================
 #  Settings
 # ===========================================================================
-BAUD        = 921600    # CH340 link speed; usb_viewer.html must use the same value
+BAUD        = 230400    # CH340 link speed; usb_viewer.html must use the same value
 SAFE_S      = 4         # seconds at 115200 after boot: Ctrl-C in this window keeps the normal REPL
 USB_QUALITY = 60        # JPEG quality sent over USB (1..100), changeable from the viewer
 WIFI_FILE   = 'wifi.json'   # written by the viewer; falls back to config.py (ssid, password)
