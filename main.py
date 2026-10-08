@@ -29,6 +29,16 @@ AP_FILE     = 'ap.json'     # persisted AP credentials
 AP_SSID_DEF = 'ESP32-CAM'   # default AP SSID
 AP_PASS_DEF = '12345678'    # >=8 chars (WPA2); shorter -> open network
 AP_AUTO     = True          # bring the AP up at boot (works alongside STA)
+AP_CHANNEL  = 6             # only used while STA is not connected (STA forces its router channel)
+AP_MAX_CLI  = 3             # max simultaneous AP clients
+STALE_MS    = 100           # encode+send slower than this -> next frame is thrown away, grab a fresh one
+CLIENT_TMO  = 1000          # ms: a client that accepted nothing for this long is dropped (browser reconnects by itself)
+STALE_RECAPTURE = False     # True: after a slow cycle throw a frame away (costs one extra capture wait)
+FB_COUNT    = 3             # camera frame buffers (more = capture overlaps encode/send)
+EXPOSURE    = None          # None = sensor auto-exposure; int (e.g. 300) locks exposure = steady fps, darker image
+BENCH       = True          # print raw sensor fps + JPEG encode time once at boot
+GRAB_LATEST = False         # False = WHEN_EMPTY: sensor fills the 2nd buffer while we encode (capture overlaps work)
+DRAIN_MS    = 60            # after sending a frame, keep pushing its remainder for up to this long
 
 # ===========================================================================
 #  Modes
@@ -48,27 +58,45 @@ MODES = {
     'jpgg':  (PixelFormat.GRAYSCALE, 1, 5, 'jpeg'),   # gray JPEG
 }
 JPEG_FMT = {'jpg': 'YCbYCr', 'jpgg': 'GRAY'}          # encoder input format
-JPEG_Q   = (20, 35, 50, 65)                           # WiFi JPEG quality levels
+JPEG_Q   = (25, 35, 45, 55, 65)                       # WiFi JPEG quality levels (encode time does NOT depend on it, only size)
+JPEG_Q0  = 2                                          # starting index
+ENC_HI   = 0                                          # ms: JPEG encode slower than this -> lower quality (0 = off, useless here)
+RES      = 'qvga'                                     # 'qvga' 320x240 (JPEG encode ~100 ms) | 'qqvga' 160x120 (~4x faster)
+EXP_SWEEP = (60, 150, 300)                            # boot bench: exposure values tried to find the sensor fps limit
 USB_PIX  = {PixelFormat.GRAYSCALE: 'GRAY', PixelFormat.YUV422: 'YCbYCr'}
 
 # Noise gate: a pixel whose change is <= GATE (8-bit equivalent) is NOT sent.
-# GATE adapts per frame between MIN and MAX: if sending a frame takes longer than
-# SEND_HI ms the gate rises (rougher but small frames), below SEND_LO it falls back.
+# GATE adapts per frame between MIN and MAX: when the link is congested the gate
+# rises (rougher but small frames), when it is clear it falls back.
 KIND      = {'rle': 0, 'rle332': 1, 'rleyuv': 2, 'chunk': 0}   # how a delta is measured
 GATE_MIN  = {'rle': 6,  'rle332': 0,   'rleyuv': 0,  'chunk': 0}
 GATE_MAX  = {'rle': 80, 'rle332': 150, 'rleyuv': 64, 'chunk': 0}
 GATE_STEP = {'rle': 6,  'rle332': 36,  'rleyuv': 16, 'chunk': 0}
-SEND_HI   = 80
-SEND_LO   = 30
+CLEAR_N   = 12          # congestion-free frames before quality / gate goes back up
 for _d in (KIND, GATE_MIN, GATE_MAX, GATE_STEP):
     _d['jpeg'] = 0
 
-FRAME_SIZE = FrameSize.QVGA
+if RES == 'qqvga':
+    FRAME_SIZE, WIDTH, HEIGHT = FrameSize.QQVGA, 160, 120
+else:
+    FRAME_SIZE, WIDTH, HEIGHT = FrameSize.QVGA, 320, 240
 XCLK_HZ    = 20000000
-WIDTH      = 320
-HEIGHT     = 240
+EAGAIN     = 11
 
 streams = []
+pend    = {}    # socket -> [memoryview, sent_offset, tick_started]  (unsent tail of a packet)
+
+
+def tune_sensor(c):
+    """GC0308 auto-exposure lowers the frame rate in dim light. EXPOSURE (int) locks it."""
+    if EXPOSURE is None:
+        return
+    for fn, arg in (('set_exposure_ctrl', 0), ('set_aec_value', EXPOSURE),
+                    ('set_gain_ctrl', 1)):
+        try:
+            getattr(c, fn)(arg)
+        except Exception as ex:
+            print('sensor tune %s failed: %s' % (fn, ex))
 
 
 def make_camera(name):
@@ -78,16 +106,65 @@ def make_camera(name):
         pixel_format=MODES[name][0],
         xclk_freq=XCLK_HZ,
         init=True,
-        grab_mode=GrabMode.LATEST,   # sensor keeps filling buffers while we encode/send
-        fb_count=2,
+        grab_mode=GrabMode.LATEST if GRAB_LATEST else GrabMode.WHEN_EMPTY,
+        fb_count=FB_COUNT,
     )
+    tune_sensor(c)
     return c
+
+
+def bench():
+    """Boot benchmark: raw sensor rate and JPEG encode time (printed once)."""
+    r = None
+    try:
+        for _ in range(3):
+            cam.capture()
+        n = 30
+        t = time.ticks_ms()
+        for _ in range(n):
+            r = cam.capture()
+        dt = time.ticks_diff(time.ticks_ms(), t)
+        print('BENCH sensor capture-only: %.1f fps (%d ms/frame)' % (n * 1000 / dt, dt // n))
+        if HAVE_JPEG and r is not None and current_name in JPEG_FMT:
+            e = jpeg.Encoder(height=HEIGHT, width=WIDTH, pixel_format=JPEG_FMT[current_name],
+                             quality=30, rotation=0)
+            t = time.ticks_ms()
+            for _ in range(10):
+                j = e.encode(r)
+            print('BENCH jpeg encode: %d ms/frame, %d B' % (
+                time.ticks_diff(time.ticks_ms(), t) // 10, len(j)))
+    except Exception as ex:
+        print('BENCH failed:', ex)
+    # exposure sweep: does a locked (short) exposure raise the sensor fps?
+    try:
+        for v in EXP_SWEEP:
+            try:
+                cam.set_exposure_ctrl(0)
+            except Exception:
+                pass            # GC0308 driver may not support it
+            cam.set_aec_value(v)
+            for _ in range(2):
+                cam.capture()
+            n = 15
+            t = time.ticks_ms()
+            for _ in range(n):
+                cam.capture()
+            dt = time.ticks_diff(time.ticks_ms(), t)
+            print('BENCH exposure %d: %.1f fps' % (v, n * 1000 / dt))
+        try:
+            cam.set_exposure_ctrl(1)
+        except Exception:
+            pass
+    except Exception as ex:
+        print('BENCH exposure sweep failed:', ex)
 
 
 current_name = 'jpg' if HAVE_JPEG else 'rgb'
 _t0 = time.ticks_ms()
 cam = make_camera(current_name)
 print('Camera init: %d ms' % time.ticks_diff(time.ticks_ms(), _t0))
+if BENCH:
+    bench()
 
 # ===========================================================================
 #  WiFi (non-blocking: the USB link works even when WiFi is not configured)
@@ -96,7 +173,10 @@ print('Camera init: %d ms' % time.ticks_diff(time.ticks_ms(), _t0))
 # ===========================================================================
 station = network.WLAN(network.STA_IF)
 station.active(True)
-station.config(pm=station.PM_NONE)
+try:
+    station.config(pm=station.PM_NONE)
+except Exception:
+    pass
 
 ap = network.WLAN(network.AP_IF)
 
@@ -105,6 +185,7 @@ wifi_up   = False
 ap_ssid   = AP_SSID_DEF
 ap_pass   = AP_PASS_DEF
 ap_up     = False
+ap_want   = AP_AUTO     # watchdog: restart the AP if it dies while this is True
 srv       = None
 poller    = select.poll()
 
@@ -181,12 +262,14 @@ def start_server():
 
 def ap_start(ssid=None, pw=None):
     """Bring up the ESP32 soft-AP. Runs alongside STA (same channel)."""
-    global ap_up, ap_ssid, ap_pass
+    global ap_up, ap_ssid, ap_pass, ap_want
     if ssid:
         ap_ssid = ssid
     if pw is not None:
         ap_pass = pw
+    ap_want = True
     try:
+        gc.collect()
         ap.active(True)
         cfg = {'essid': ap_ssid}
         if len(ap_pass) >= 8:
@@ -195,6 +278,15 @@ def ap_start(ssid=None, pw=None):
         else:
             cfg['authmode'] = network.AUTH_OPEN
         ap.config(**cfg)
+        # optional settings: not every firmware build knows them, never let them kill the AP
+        try:
+            ap.config(channel=AP_CHANNEL)
+        except Exception:
+            pass
+        try:
+            ap.config(max_clients=AP_MAX_CLI)
+        except Exception:
+            pass
         ap_up = True
         print('AP up: ssid=%s ip=%s' % (ap_ssid, ap.ifconfig()[0]))
         if srv is None:
@@ -210,7 +302,8 @@ def ap_start(ssid=None, pw=None):
 
 
 def ap_stop():
-    global ap_up
+    global ap_up, ap_want
+    ap_want = False
     try:
         ap.active(False)
     except Exception:
@@ -230,6 +323,16 @@ def wifi_check():
         now_ap = ap.active()
     except Exception:
         now_ap = False
+
+    # watchdog: AP died by itself -> bring it back
+    if ap_want and not now_ap:
+        print('AP died, restarting')
+        ap_start()
+        try:
+            now_ap = ap.active()
+        except Exception:
+            now_ap = False
+
     if now_ap != ap_up:
         ap_up = now_ap
         if ap_up:
@@ -243,7 +346,10 @@ def wifi_check():
 
 
 _s, _p = load_wifi()
-wifi_connect(_s, _p)
+try:
+    wifi_connect(_s, _p)
+except Exception as _e:
+    print('STA connect failed:', _e)
 
 load_ap()
 if AP_AUTO:
@@ -364,7 +470,7 @@ CODEC       = 'chunk'
 GATE        = 0
 ENCODERS    = {}     # WiFi jpeg.Encoder per quality level, created lazily
 usb_encs    = {}     # USB jpeg.Encoder per pixel format
-jq_idx      = 2      # current index into JPEG_Q
+jq_idx      = JPEG_Q0   # current index into JPEG_Q
 jq_fixed    = None   # None = adaptive WiFi JPEG quality, else a fixed index
 GEOMETRY    = b''
 prev        = bytearray()
@@ -425,7 +531,7 @@ def setup_codec(frame_len):
     QBUF = None
     ENCODERS.clear()
     usb_encs.clear()
-    jq_idx = 2 if jq_fixed is None else jq_fixed
+    jq_idx = JPEG_Q0 if jq_fixed is None else jq_fixed
     gc.collect()
     prev = bytearray(0 if CODEC == 'jpeg' else WIRE_LEN)
     if CODEC in ('rle', 'rle332', 'rleyuv'):
@@ -443,6 +549,7 @@ def close_streams():
         except OSError:
             pass
     del streams[:]
+    pend.clear()
 
 
 def change_format(new_name):
@@ -996,7 +1103,7 @@ def encode_rle(src):
         force_full = False
         prev_ok = True
         prev[:] = src
-        return b'\x00' + WIRE_LEN.to_bytes(4, 'little') + src
+        return b'\x00' + WIRE_LEN.to_bytes(4, 'little') + bytes(src)
 
     o = rle_closed(src, prev, OUTBUF, WIRE_LEN, GATE, KIND[CODEC])
     return b'\x02' + o.to_bytes(4, 'little') + bytes(memoryview(OUTBUF)[:o])
@@ -1012,6 +1119,88 @@ def set_mode(name):
         change_format(name)
     if CODEC == 'jpeg' and get_enc() is None:
         change_format('rgb')    # encoder refused this format: fall back
+
+
+# ===========================================================================
+#  Non-blocking WiFi sending: a slow client (AP!) never stalls the main loop.
+#  Unsent bytes of a packet are kept per socket in `pend`; while any client is
+#  still draining, the next WiFi frame is simply not encoded (encoders only
+#  update `prev` when they encode, so delta codecs stay in sync).
+# ===========================================================================
+def drop_clients(dead):
+    if not dead:
+        return
+    print('dropping %d stuck/dead client(s), free heap %d' % (len(dead), gc.mem_free()))
+    for c in dead:
+        pend.pop(c, None)
+        if c in streams:
+            streams.remove(c)
+        try:
+            c.close()
+        except OSError:
+            pass
+    gc.collect()
+
+
+def flush_pending():
+    """Push unsent bytes. Drops clients that are dead or have been stuck too long."""
+    if not pend:
+        return
+    dead = None
+    now = time.ticks_ms()
+    for c in list(pend.keys()):
+        p = pend[c]
+        try:
+            n = c.send(p[0][p[1]:])
+            if n is None:
+                n = 0
+        except OSError as e:
+            if e.args and e.args[0] == EAGAIN:
+                n = 0
+            else:
+                print('flush error:', e)
+                if dead is None:
+                    dead = []
+                dead.append(c)
+                continue
+        if n:
+            p[1] += n
+            p[2] = now
+            if p[1] >= len(p[0]):
+                del pend[c]
+                continue
+        if time.ticks_diff(now, p[2]) > CLIENT_TMO:
+            if dead is None:
+                dead = []
+            dead.append(c)
+    drop_clients(dead)
+
+
+def send_packet(packet):
+    """Send to every client without blocking; the remainder is queued in `pend`."""
+    dead = None
+    mv = None
+    L = len(packet)
+    now = time.ticks_ms()
+    for c in streams:
+        try:
+            n = c.send(packet)
+            if n is None:
+                n = 0
+        except OSError as e:
+            if e.args and e.args[0] == EAGAIN:
+                n = 0
+            else:
+                print('send error:', e)
+                if dead is None:
+                    dead = []
+                dead.append(c)
+                continue
+        if n < L:
+            if mv is None:
+                mv = memoryview(packet)
+            pend[c] = [mv, n, now]
+    drop_clients(dead)
 
 
 # ===========================================================================
@@ -1181,11 +1370,28 @@ def enter_fast_usb():
         os.dupterm(None)
     except Exception:
         pass
-    try:
-        uart = machine.UART(0, baudrate=BAUD, txbuf=16384, rxbuf=1024)
-    except Exception as e:
-        uart = None
-        print('USB: fast UART failed (%s), staying at 115200' % e)
+    uart = None
+    err = None
+    # some ports refuse custom buffer sizes on the REPL UART: try fewer arguments
+    for kw in (dict(baudrate=BAUD, txbuf=16384, rxbuf=1024),
+               dict(baudrate=BAUD, txbuf=16384),
+               dict(baudrate=BAUD)):
+        try:
+            uart = machine.UART(0, **kw)
+            break
+        except Exception as e:
+            err = e
+    if uart is None:
+        try:
+            u = machine.UART(0, 115200)
+            u.init(baudrate=BAUD)
+            uart = u
+        except Exception as e:
+            err = e
+    if uart is None:
+        print('USB: fast UART failed (%s), staying at 115200' % err)
+    else:
+        print('USB: UART0 at %d baud' % BAUD)
     if uart is None:
         stdin_poll = select.poll()
         stdin_poll.register(sys.stdin, select.POLLIN)
@@ -1210,7 +1416,9 @@ def restore_repl():
 #  HTTP handling (WiFi)
 # ===========================================================================
 def read_request(c):
-    c.settimeout(1.0)
+    # short timeout: browsers on the AP open speculative connections that never
+    # send anything, a long wait here would freeze the whole stream
+    c.settimeout(0.3)
     data = b''
     while b'\r\n\r\n' not in data and len(data) < 1024:
         try:
@@ -1248,6 +1456,7 @@ def handle_new(c):
             c.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             c.settimeout(1.5)
             c.sendall(STREAM_HEADER + GEOMETRY)
+            c.setblocking(False)    # from now on frames go out via send_packet / flush_pending
             streams.append(c)
             force_full = True
             return
@@ -1279,7 +1488,7 @@ def handle_new(c):
             c.sendall(HTML_HEADER + HTML)
         except OSError:
             pass
-    else:
+    elif req:
         try:
             c.settimeout(3.0)
             c.sendall(NOT_FOUND)
@@ -1298,141 +1507,187 @@ def handle_new(c):
 bad_frames = 0
 st_t = time.ticks_ms()
 st_n = 0
+st_f = 0
 st_cap = 0
 st_enc = 0
 st_snd = 0
 st_bytes = 0
+st_drop = 0
 wifi_t = time.ticks_ms()
+stale = False       # last cycle was slow: throw the buffered frame away, grab a fresh one
+clean = 0           # consecutive congestion-free frames
 
 try:
     enter_fast_usb()
 
     while True:
-        for obj, _ in poller.poll(0 if (streams or usb_on) else 20):
-            if obj is srv:
-                try:
-                    client, _ = srv.accept()
-                except OSError:
-                    continue
-                handle_new(client)
-
-        usb_poll()
-        if quit_flag:
-            break
-
-        now = time.ticks_ms()
-        if usb_on and time.ticks_diff(now, usb_last) > 6000:
-            usb_on = False          # viewer closed without saying goodbye
-        if time.ticks_diff(now, wifi_t) >= 1000:
-            wifi_t = now
-            wifi_check()
-
-        if not streams and not usb_on:
-            continue
-
-        t_a = time.ticks_ms()
-        raw = cam.capture()
-        if not raw:
-            continue
-
-        if len(raw) != FRAME_LEN:
-            bad_frames += 1
-            if bad_frames >= 20:
-                bad_frames = 0
-                adopt_actual(len(raw))
-            continue
-        bad_frames = 0
-
-        fb = bytes(raw)
-        t_b = time.ticks_ms()
-
-        # ---- WiFi packet ----------------------------------------------------
-        packet = None
-        jbytes = None
-        if streams:
-            frame_count += 1
-            if frame_count % FORCE_FULL_EVERY == 0:
-                force_full = True
-
-            if CODEC == 'jpeg':
-                jbytes = jpeg_encode(fb)
-                if jbytes is not None:
-                    packet = b'\x03' + len(jbytes).to_bytes(4, 'little') + jbytes
-            elif CODEC == 'chunk':
-                packet = encode_chunk(fb)
-            elif CODEC == 'rle':
-                packet = encode_rle(fb)
-            elif CODEC == 'rle332':
-                rgb565_to_332(fb, QBUF, FRAME_LEN)
-                packet = encode_rle(QBUF)
-            else:
-                yuv_to_44(fb, QBUF, FRAME_LEN)
-                packet = encode_rle(QBUF)
-
-        # ---- USB frame (reuses the WiFi JPEG when there is one) -------------
-        if usb_on:
-            if jbytes is None:
-                jbytes = usb_jpeg(fb)
-            if jbytes is not None:
-                usb_send_jpeg(jbytes)
-
-        t_c = time.ticks_ms()
-        snd = 0
-
-        if packet is not None:
-            dead = None
-            for c in streams:
-                try:
-                    c.sendall(packet)
-                except OSError:
-                    if dead is None:
-                        dead = []
-                    dead.append(c)
-
-            snd = time.ticks_diff(time.ticks_ms(), t_c)
-
-            # adapt gate / jpeg quality to how long sending takes
-            if CODEC == 'jpeg':
-                if jq_fixed is None:
-                    if snd > SEND_HI and jq_idx > 0:
-                        jq_idx -= 1
-                    elif snd < SEND_LO and jq_idx < len(JPEG_Q) - 1:
-                        jq_idx += 1
-            elif CODEC != 'chunk' and packet[0] == 2:
-                if snd > SEND_HI:
-                    GATE = min(GATE_MAX[CODEC], GATE + GATE_STEP[CODEC])
-                elif snd < SEND_LO:
-                    GATE = max(GATE_MIN[CODEC], GATE - GATE_STEP[CODEC])
-
-            if dead:
-                for c in dead:
-                    if c in streams:
-                        streams.remove(c)
+        # One bad iteration (MemoryError, socket error, ...) must never kill the
+        # whole script: log it, free memory, carry on.
+        try:
+            for obj, _ in poller.poll(0 if (streams or usb_on) else 20):
+                if obj is srv:
                     try:
-                        c.close()
+                        client, _ = srv.accept()
                     except OSError:
-                        pass
-                gc.collect()
+                        continue
+                    try:
+                        handle_new(client)
+                    except Exception as e:
+                        print('client error:', e)
+                        try:
+                            client.close()
+                        except Exception:
+                            pass
+                        gc.collect()
 
-        st_n += 1
-        st_cap += time.ticks_diff(t_b, t_a)
-        st_enc += time.ticks_diff(t_c, t_b)
-        st_snd += snd
-        st_bytes += len(packet) if packet is not None else (len(jbytes) if jbytes is not None else 0)
+            usb_poll()
+            if quit_flag:
+                break
 
-        if time.ticks_diff(time.ticks_ms(), st_t) >= 3000:
-            if not usb_on:      # keep the USB line clean while streaming over it
-                print('%s: %.1f fps | cap %d enc %d send %d ms | %d B/frame | level %d | rssi %d dBm' % (
-                    current_name, st_n * 1000 / time.ticks_diff(time.ticks_ms(), st_t),
-                    st_cap // st_n, st_enc // st_n, st_snd // st_n,
-                    st_bytes // st_n, JPEG_Q[jq_idx] if CODEC == 'jpeg' else GATE,
-                    rssi()))
-            st_t = time.ticks_ms()
-            st_n = 0
-            st_cap = 0
-            st_enc = 0
-            st_snd = 0
-            st_bytes = 0
+            now = time.ticks_ms()
+            if usb_on and time.ticks_diff(now, usb_last) > 6000:
+                usb_on = False          # viewer closed without saying goodbye
+            if time.ticks_diff(now, wifi_t) >= 1000:
+                wifi_t = now
+                wifi_check()
+
+            if streams:
+                flush_pending()
+
+            if not streams and not usb_on:
+                stale = False
+                continue
+
+            if stale and STALE_RECAPTURE:
+                # last frame took > STALE_MS: the buffered frame is old, record a new one
+                stale = False
+                cam.capture()
+
+            t_a = time.ticks_ms()
+            raw = cam.capture()
+            if not raw:
+                continue
+
+            if len(raw) != FRAME_LEN:
+                bad_frames += 1
+                if bad_frames >= 20:
+                    bad_frames = 0
+                    adopt_actual(len(raw))
+                continue
+            bad_frames = 0
+
+            # only the chunk codec needs a private copy; the others read the camera buffer in place
+            fb = bytes(raw) if CODEC == 'chunk' else raw
+            t_b = time.ticks_ms()
+
+            # ---- WiFi packet ------------------------------------------------
+            packet = None
+            jbytes = None
+            dropped = False
+            if streams:
+                if pend:
+                    # a client is still draining the previous frame: skip this one
+                    dropped = True
+                else:
+                    frame_count += 1
+                    if frame_count % FORCE_FULL_EVERY == 0:
+                        force_full = True
+
+                    if CODEC == 'jpeg':
+                        jbytes = jpeg_encode(fb)
+                        if jbytes is not None:
+                            packet = b'\x03' + len(jbytes).to_bytes(4, 'little') + jbytes
+                    elif CODEC == 'chunk':
+                        packet = encode_chunk(fb)
+                    elif CODEC == 'rle':
+                        packet = encode_rle(fb)
+                    elif CODEC == 'rle332':
+                        rgb565_to_332(fb, QBUF, FRAME_LEN)
+                        packet = encode_rle(QBUF)
+                    else:
+                        yuv_to_44(fb, QBUF, FRAME_LEN)
+                        packet = encode_rle(QBUF)
+
+            # ---- USB frame (reuses the WiFi JPEG when there is one) ---------
+            if usb_on:
+                if jbytes is None:
+                    jbytes = usb_jpeg(fb)
+                if jbytes is not None:
+                    usb_send_jpeg(jbytes)
+
+            t_c = time.ticks_ms()
+            snd = 0
+
+            if packet is not None:
+                send_packet(packet)
+                td = time.ticks_ms()
+                # the sensor is already filling the next buffer: use the time to push the rest out
+                while pend and time.ticks_diff(time.ticks_ms(), td) < DRAIN_MS:
+                    time.sleep_ms(1)
+                    flush_pending()
+                snd = time.ticks_diff(time.ticks_ms(), t_c)
+
+            # ---- adapt quality / gate to congestion -------------------------
+            if streams and (packet is not None or dropped):
+                congested = dropped or bool(pend) or (
+                    CODEC == 'jpeg' and ENC_HI and time.ticks_diff(t_c, t_b) > ENC_HI)
+                if CODEC == 'jpeg':
+                    if jq_fixed is None:
+                        if congested:
+                            clean = 0
+                            if jq_idx > 0:
+                                jq_idx -= 1
+                        else:
+                            clean += 1
+                            if clean >= CLEAR_N and jq_idx < len(JPEG_Q) - 1:
+                                jq_idx += 1
+                                clean = 0
+                elif CODEC != 'chunk':
+                    if congested:
+                        clean = 0
+                        GATE = min(GATE_MAX[CODEC], GATE + GATE_STEP[CODEC])
+                    else:
+                        clean += 1
+                        if clean >= CLEAR_N:
+                            GATE = max(GATE_MIN[CODEC], GATE - GATE_STEP[CODEC])
+                            clean = 0
+
+            t_d = time.ticks_ms()
+            if time.ticks_diff(t_d, t_b) > STALE_MS:
+                stale = True
+
+            st_n += 1
+            if packet is not None or jbytes is not None:
+                st_f += 1
+            st_cap += time.ticks_diff(t_b, t_a)
+            st_enc += time.ticks_diff(t_c, t_b)
+            st_snd += snd
+            if dropped:
+                st_drop += 1
+            st_bytes += len(packet) if packet is not None else (len(jbytes) if jbytes is not None else 0)
+
+            if time.ticks_diff(time.ticks_ms(), st_t) >= 3000:
+                if not usb_on:      # keep the USB line clean while streaming over it
+                    print('%s: %.1f fps | cap %d enc %d send %d ms | %d B/frame | drop %d | cli %d | level %d | rssi %d dBm' % (
+                        current_name, st_f * 1000 / time.ticks_diff(time.ticks_ms(), st_t),
+                        st_cap // st_n, st_enc // st_n, st_snd // st_n,
+                        st_bytes // st_n, st_drop, len(streams), JPEG_Q[jq_idx] if CODEC == 'jpeg' else GATE,
+                        rssi()))
+                st_t = time.ticks_ms()
+                st_n = 0
+                st_f = 0
+                st_cap = 0
+                st_enc = 0
+                st_snd = 0
+                st_bytes = 0
+                st_drop = 0
+
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print('loop error:', e)
+            gc.collect()
+            time.sleep_ms(20)
 
 except KeyboardInterrupt:
     print('Stopped')
