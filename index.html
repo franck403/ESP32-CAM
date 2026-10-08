@@ -43,19 +43,21 @@
   .toggle{display:flex;flex-direction:row;align-items:center;gap:6px;
           font-size:13px;color:#bcc}
   .toggle input{width:auto}
+  [hidden]{display:none !important}
 </style>
 </head>
 <body>
 <div class="page">
   <h1>ESP32 Camera</h1>
-  <p class="sub">Install the camera script over USB, then open the USB viewer.</p>
+  <p class="sub">Install the camera script over USB, then watch it over USB or WiFi.</p>
 
   <div id="unsupported">This browser has no Web Serial. Use Chrome or Edge on a PC.</div>
 
   <section class="card">
     <h2>1. Install</h2>
     <p>Fetches <code>main.py</code> from this site and writes it to the board over USB
-       at 115200 baud. Close Thonny or any serial monitor first.</p>
+       at 115200 baud. Close Thonny or any serial monitor first. When it is done, the
+       installer asks the board for its WiFi IP and saves it for the WiFi viewer.</p>
     <div id="src">Checking main.py...</div>
     <details id="local">
       <summary>Use a local file instead</summary>
@@ -104,6 +106,26 @@
     </ol>
     <a class="btn" id="viewer" href="usb_viewer.html">Open USB viewer</a>
   </section>
+
+  <section class="card">
+    <h2>3. WiFi viewer (+ AI)</h2>
+    <p>Watch the stream from the board's local IP and run small AI models on the frame
+       (objects, description, LEGO parts). The IP is filled in by the installer; you can
+       always type or change it.</p>
+    <div class="row">
+      <label>Board IP
+        <input type="text" id="camIp" list="recentIps" placeholder="192.168.x.x" autocomplete="off" spellcheck="false">
+      </label>
+      <datalist id="recentIps"></datalist>
+      <a class="btn primary" id="wifiViewer" href="wifi_viewer.html">Open WiFi viewer</a>
+      <a class="btn" id="direct" href="#" target="_blank" rel="noopener" hidden>Board's own page</a>
+    </div>
+    <div class="row">
+      <button id="findIp">Find IP over USB</button>
+      <span class="hint">Board already installed? Plug it in and press this (needs the camera script running, not the REPL).</span>
+    </div>
+    <p class="hint" id="ipState"></p>
+  </section>
 </div>
 
 <script>
@@ -122,6 +144,54 @@
     el.textContent += msg + '\n';
     el.scrollTop = el.scrollHeight;
   }
+
+  // ---- saved board IP (shared with wifi_viewer.html through localStorage) ----
+  var LS_IP = 'esp32cam.ip', LS_RECENT = 'esp32cam.recent';
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function cleanHost(s) {
+    return String(s || '').trim().replace(/^https?:\/\//i, '').replace(/[\/?#].*$/, '');
+  }
+  function getRecent() {
+    try { var a = JSON.parse(lsGet(LS_RECENT) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+  }
+  function fillRecent() {
+    var dl = $('recentIps');
+    dl.textContent = '';
+    getRecent().forEach(function (h) {
+      var o = document.createElement('option');
+      o.value = h;
+      dl.appendChild(o);
+    });
+  }
+  function updateLinks() {
+    var ip = cleanHost($('camIp').value);
+    $('wifiViewer').href = 'wifi_viewer.html' + (ip ? '?ip=' + encodeURIComponent(ip) : '');
+    $('direct').hidden = !ip;
+    $('direct').href = ip ? 'http://' + ip + '/' : '#';
+  }
+  function saveIp(ip) {
+    ip = cleanHost(ip);
+    if (!ip) return;
+    lsSet(LS_IP, ip);
+    var a = getRecent().filter(function (x) { return x !== ip; });
+    a.unshift(ip);
+    lsSet(LS_RECENT, JSON.stringify(a.slice(0, 6)));
+    $('camIp').value = ip;
+    fillRecent();
+    updateLinks();
+  }
+  $('camIp').addEventListener('input', updateLinks);
+  $('camIp').addEventListener('change', function () {
+    var ip = cleanHost($('camIp').value);
+    if (ip) { saveIp(ip); $('ipState').textContent = 'IP saved: ' + ip; }
+  });
+  (function initIp() {
+    var ip = cleanHost(lsGet(LS_IP) || '');
+    if (ip) { $('camIp').value = ip; $('ipState').textContent = 'Saved IP: ' + ip; }
+    fillRecent();
+    updateLinks();
+  })();
 
   // ---- main.py source ------------------------------------------------------
   async function loadMain() {
@@ -177,13 +247,26 @@
     })();
   }
 
-  async function closePort() {
+  async function openPort(baud, quiet) {
+    await port.open({ baudRate: baud, bufferSize: 1 << 16 });
+    if (quiet) {                            // keep DTR/RTS low so the board is not reset by the open
+      try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (e) {}
+    }
+    writer = port.writable.getWriter();
+    startReading();
+  }
+
+  async function releasePort() {            // closes the port but keeps the port object for a reopen
     reading = false;
     try { if (reader) await reader.cancel(); } catch (e) {}
     try { if (readDone) await readDone; } catch (e) {}
     try { if (writer) writer.releaseLock(); } catch (e) {}
     writer = null;
     try { if (port) await port.close(); } catch (e) {}
+  }
+
+  async function closePort() {
+    await releasePort();
     port = null;
   }
 
@@ -260,6 +343,58 @@
       b64(enc.encode(json)) + "').decode())");
   }
 
+  // ---- find the board IP over USB -------------------------------------------
+  // The running main.py listens at 921600 baud and answers {"cmd":"get"} with a
+  // status packet that contains "ip" (STA) and "ap_ip" (AP). Port must be open at 921600.
+  async function probeIp(timeoutMs) {
+    var t0 = performance.now(), sta = '', ap = '', m;
+    var reSta = /"ip"\s*:\s*"(\d{1,3}(?:\.\d{1,3}){3})"/;
+    var reAp = /"ap_ip"\s*:\s*"(\d{1,3}(?:\.\d{1,3}){3})"/;
+    while (performance.now() - t0 < timeoutMs && !sta) {
+      await write(JSON.stringify({ cmd: 'get' }) + '\n');
+      await sleep(900);
+      m = reSta.exec(rx);
+      if (m) sta = m[1];
+      m = reAp.exec(rx);
+      if (m) ap = m[1];
+    }
+    return { sta: sta, ap: ap };
+  }
+
+  function reportIp(found) {
+    if (found.sta) {
+      saveIp(found.sta);
+      $('ipState').textContent = 'IP saved: ' + found.sta;
+      log('Board IP: ' + found.sta + ' (saved: the WiFi viewer will connect to it directly).');
+    } else if (found.ap) {
+      log('The board did not join a router (no STA IP). Its hotspot IP is ' + found.ap +
+          ': join the "' + ($('apSsid').value.trim() || 'ESP32-CAM') + '" WiFi, then use that IP.');
+      if (!cleanHost($('camIp').value)) saveIp(found.ap);
+    } else {
+      log('Could not read an IP from the board. Type it in step 3 (or press "Find IP over USB" later).');
+    }
+  }
+
+  async function findIp() {
+    if (!('serial' in navigator)) { log('Web Serial is not available in this browser.'); return; }
+    var btn = $('findIp');
+    btn.disabled = true;
+    $('install').disabled = true;
+    $('log').textContent = '';
+    try {
+      port = await navigator.serial.requestPort();
+      await openPort(921600, true);
+      log('Asking the board for its IP (up to 20 s)...');
+      reportIp(await probeIp(20000));
+    } catch (e) {
+      log('FAILED: ' + e.message);
+    } finally {
+      await closePort();
+      btn.disabled = false;
+      $('install').disabled = false;
+    }
+  }
+
   // ---- install ------------------------------------------------------------
   async function install() {
     $('log').textContent = '';
@@ -285,15 +420,14 @@
 
     var btn = $('install'), prog = $('prog');
     btn.disabled = true;
+    $('findIp').disabled = true;
     prog.hidden = false;
     prog.value = 0;
     $('viewer').classList.remove('good');
 
     try {
       port = await navigator.serial.requestPort();
-      await port.open({ baudRate: 115200, bufferSize: 1 << 16 });
-      writer = port.writable.getWriter();
-      startReading();
+      await openPort(115200, false);
 
       log('Port open. Resetting the board...');
       await hardReset();
@@ -350,12 +484,19 @@
       await write('\x04');                  // soft reboot: runs the new main.py
       await sleep(600);
       prog.value = 100;
-
-      var addr = apEnable ? '192.168.4.1 (AP)' : '';
-      if (ssid) addr += (addr ? ' / ' : '') + 'the board\'s LAN IP (STA)';
-      log('Done. The board is restarting: wait about 5 seconds.');
-      if (addr) log('Open the stream at http://' + addr + ' or use the USB viewer.');
       $('viewer').classList.add('good');
+      log('Done. The board is restarting.');
+
+      // ---- read the board IP over USB (it switches to 921600 baud ~5 s after boot) ----
+      try {
+        await releasePort();
+        log('Looking for the board IP over USB' + (ssid ? ' (up to 25 s)' : '') + '...');
+        await sleep(6500);
+        await openPort(921600, true);
+        reportIp(await probeIp(ssid ? 25000 : 12000));
+      } catch (e2) {
+        log('Could not read the IP over USB (' + e2.message + '). Type it in step 3 instead.');
+      }
     } catch (e) {
       log('FAILED: ' + e.message);
       log('If the camera script is already running: open the USB viewer, press "Exit to REPL", then try again. ' +
@@ -363,10 +504,12 @@
     } finally {
       await closePort();
       btn.disabled = false;
+      $('findIp').disabled = false;
     }
   }
 
   $('install').addEventListener('click', install);
+  $('findIp').addEventListener('click', findIp);
   loadMain();
 })();
 </script>

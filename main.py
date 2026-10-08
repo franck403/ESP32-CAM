@@ -1268,6 +1268,7 @@ def handle_new(c):
             c.settimeout(3.0)
             c.sendall(
                 b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n'
+                b'Access-Control-Allow-Origin: *\r\n'
                 b'Content-Length: %d\r\nCache-Control: no-store\r\n'
                 b'Connection: close\r\n\r\n' % len(info) + info)
         except OSError:

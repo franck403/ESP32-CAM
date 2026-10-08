@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 WiFi Viewer</title>
+<style>
+  :root{color-scheme:dark}
+  html,body{margin:0;background:#111;color:#eee;font-family:system-ui,Arial,sans-serif}
+  .wrap{max-width:980px;margin:0 auto;padding:12px;box-sizing:border-box;display:flex;flex-direction:column;gap:10px}
+  .bar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;font-size:13px;color:#9aa}
+  label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:#9aa}
+  label.inline{flex-direction:row;align-items:center;gap:6px;font-size:13px}
+  button,select,input[type=number],input[type=text],textarea{
+        background:#222;color:#eee;border:1px solid #444;border-radius:4px;padding:6px 10px;font-size:13px;font-family:inherit}
+  input[type=text]{width:180px}
+  input[type=number]{width:70px}
+  textarea{width:100%;box-sizing:border-box;min-height:64px;resize:vertical}
+  button{cursor:pointer}
+  button:hover{background:#333}
+  button:disabled{opacity:.4;cursor:default}
+  .primary{background:#1d5fd1;border-color:#2b74ea}
+  .primary:hover{background:#2368e0}
+  .stage{height:min(58vh,480px);min-height:160px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  canvas{display:block;background:#000;border:1px solid #333;border-radius:6px}
+  canvas:fullscreen{width:100vw !important;height:100vh !important;border:0;border-radius:0;object-fit:contain}
+  #status{font-size:13px;color:#9aa;text-align:center}
+  #net{font-size:12px;color:#789;text-align:center;min-height:14px}
+  #warn{background:#3a2f1a;border:1px solid #6a5a2c;color:#f0d9a4;border-radius:6px;padding:9px 12px;font-size:13px;line-height:1.5}
+  #warn a{color:#9cf}
+  details{font-size:13px;color:#9aa;background:#181818;border:1px solid #2a2a2a;border-radius:8px;padding:10px 14px}
+  summary{cursor:pointer;color:#cde;font-size:14px}
+  .grid{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:flex-end;margin:10px 0}
+  .hint{font-size:12px;color:#899;line-height:1.5;margin:6px 0}
+  progress{width:220px;height:10px;vertical-align:middle}
+  #aiMsg{font-size:12px;color:#9ab;margin-left:8px}
+  #aiCanvas{max-width:100%;height:auto;margin-top:10px}
+  #aiList{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+  #aiList li{display:flex;gap:10px;align-items:center;background:#111;border:1px solid #2a2a2a;border-radius:6px;padding:6px 10px;color:#dbe4f0;font-size:13px}
+  #aiList img{width:48px;height:48px;object-fit:contain;background:#fff;border-radius:4px}
+  #aiList .sc{margin-left:auto;color:#7fd48f;font-variant-numeric:tabular-nums}
+  #aiList a{color:#9cf}
+  #aiList .err{color:#f0b4b4}
+  [hidden]{display:none !important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <label>Board IP
+      <input type="text" id="ip" list="recent" placeholder="192.168.x.x" autocomplete="off" spellcheck="false">
+    </label>
+    <datalist id="recent"></datalist>
+    <button id="connect" class="primary">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+    <label>Mode
+      <select id="fmt">
+        <option value="jpg">Color JPEG</option>
+        <option value="jpgg">Gray JPEG</option>
+      </select>
+    </label>
+    <label>Scale
+      <select id="scale">
+        <option value="fit">Fit window</option>
+        <option value="1">1x</option>
+        <option value="2">2x</option>
+        <option value="3">3x</option>
+        <option value="4">4x</option>
+      </select>
+    </label>
+    <label class="inline"><input type="checkbox" id="smooth" checked> Smooth</label>
+    <button id="snap">Snapshot</button>
+    <button id="full">Fullscreen</button>
+  </div>
+
+  <div id="warn" hidden></div>
+
+  <div class="stage" id="stage"><canvas id="c" width="320" height="240"></canvas></div>
+  <div id="status">Not connected</div>
+  <div id="net"></div>
+
+  <details id="ai" open>
+    <summary>AI: what is in the image?</summary>
+    <p class="hint">Models run inside your browser (Transformers.js): free, no server, downloaded once then cached.
+       Only the "Brickognize" engine sends the frame to an online service.</p>
+    <div class="grid">
+      <label>Engine
+        <select id="engine"></select>
+      </label>
+      <label id="deviceRow">Run on
+        <select id="device">
+          <option value="wasm">CPU (WASM, small q8 models)</option>
+          <option value="webgpu">GPU (WebGPU, faster, bigger download)</option>
+        </select>
+      </label>
+      <button id="analyze" class="primary">Analyze this frame</button>
+      <label class="inline"><input type="checkbox" id="auto"> every
+        <input type="number" id="autoSec" value="5" min="2" max="120"> s</label>
+    </div>
+    <div id="labelsRow" hidden>
+      <label>Labels (comma separated, editable)
+        <textarea id="labels" spellcheck="false"></textarea>
+      </label>
+    </div>
+    <div id="customRow" class="grid" hidden>
+      <label>Hugging Face model id (ONNX / Transformers.js)
+        <input type="text" id="cModel" style="width:300px" placeholder="user/your-lego-model" spellcheck="false">
+      </label>
+      <label>Task
+        <select id="cTask">
+          <option value="image-classification">image-classification</option>
+          <option value="zero-shot-image-classification">zero-shot-image-classification</option>
+          <option value="object-detection">object-detection</option>
+          <option value="image-to-text">image-to-text</option>
+        </select>
+      </label>
+    </div>
+    <p class="hint" id="aiNote"></p>
+    <div><progress id="aiProg" max="100" value="0" hidden></progress><span id="aiMsg"></span></div>
+    <canvas id="aiCanvas" hidden></canvas>
+    <ul id="aiList"></ul>
+  </details>
+</div>
+
+<script type="module">
+'use strict';
+const $ = (id) => document.getElementById(id);
+
+/* ==================== storage (saved IP, recent IPs) ==================== */
+const LS_IP = 'esp32cam.ip', LS_RECENT = 'esp32cam.recent';
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+function getRecent() {
+  try { const a = JSON.parse(lsGet(LS_RECENT) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+}
+function fillRecent() {
+  const dl = $('recent');
+  dl.textContent = '';
+  getRecent().forEach((h) => { const o = document.createElement('option'); o.value = h; dl.appendChild(o); });
+}
+function rememberIp(h) {
+  lsSet(LS_IP, h);
+  const a = getRecent().filter((x) => x !== h);
+  a.unshift(h);
+  lsSet(LS_RECENT, JSON.stringify(a.slice(0, 6)));
+  fillRecent();
+}
+function cleanHost(s) {
+  return String(s || '').trim().replace(/^https?:\/\//i, '').replace(/[\/?#].*$/, '');
+}
+
+/* ==================== view ==================== */
+const canvas = $('c'), ctx = canvas.getContext('2d', { alpha: false });
+const stage = $('stage'), statusEl = $('status'), scaleEl = $('scale'), smoothEl = $('smooth');
+
+function applyView() {
+  canvas.style.imageRendering = smoothEl.checked ? 'auto' : 'pixelated';
+  const cw = canvas.width || 1, ch = canvas.height || 1, s = scaleEl.value;
+  if (s === 'fit') {
+    const r = stage.getBoundingClientRect();
+    const k = Math.min(Math.max(32, r.width - 4) / cw, Math.max(32, r.height - 4) / ch);
+    canvas.style.width = Math.max(1, Math.floor(cw * k)) + 'px';
+    canvas.style.height = Math.max(1, Math.floor(ch * k)) + 'px';
+  } else {
+    const k2 = parseInt(s, 10) || 1;
+    canvas.style.width = (cw * k2) + 'px';
+    canvas.style.height = (ch * k2) + 'px';
+  }
+}
+scaleEl.addEventListener('change', applyView);
+smoothEl.addEventListener('change', applyView);
+window.addEventListener('resize', applyView);
+if (window.ResizeObserver) new ResizeObserver(applyView).observe(stage);
+document.addEventListener('fullscreenchange', () => setTimeout(applyView, 0));
+$('full').addEventListener('click', () => { if (canvas.requestFullscreen) canvas.requestFullscreen(); });
+$('snap').addEventListener('click', () => {
+  canvas.toBlob((b) => {
+    if (!b) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b);
+    a.download = 'esp32-cam-' + Date.now() + '.png';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }, 'image/png');
+});
+
+/* ==================== HTTPS warning ==================== */
+function updateWarn() {
+  const w = $('warn');
+  if (location.protocol !== 'https:') { w.hidden = true; return; }
+  const h = cleanHost($('ip').value);
+  w.hidden = false;
+  w.textContent = 'This page is served over HTTPS, so the browser will probably block the http:// stream from the board. ' +
+    'Fix: open this viewer over http:// or from a local file, or allow "Insecure content" for this site ' +
+    '(lock icon > Site settings), or use the board\'s own page: ';
+  if (h) {
+    const a = document.createElement('a');
+    a.href = 'http://' + h + '/';
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = 'http://' + h + '/';
+    w.appendChild(a);
+  } else {
+    w.appendChild(document.createTextNode('http://<board ip>/'));
+  }
+}
+$('ip').addEventListener('input', updateWarn);
+
+/* ==================== stream parser (JPEG packets) ==================== */
+// Board stream: 5 bytes geometry (W W H H FMT), then packets: type u8 + len u32 LE + payload. Type 3 = JPEG.
+let W = 0, H = 0, FMT = 0, state = 0, geomFill = 0, headFill = 0;
+let payloadType = 0, payloadLen = 0, payloadFill = 0, payloadBuf = null;
+let sharedPayload = new Uint8Array(1 << 16);
+const geomBuf = new Uint8Array(5), headBuf = new Uint8Array(5);
+let frames = 0, bytesIn = 0, fpsT = performance.now(), lastData = performance.now();
+let gotFrame = false, nonJpeg = false, fails = 0, jpgSeq = 0, jpgShown = 0;
+
+function resetParser() { state = 0; geomFill = 0; headFill = 0; payloadFill = 0; }
+
+function drawJpeg(payload) {
+  const my = ++jpgSeq;
+  const blob = new Blob([payload.slice()], { type: 'image/jpeg' });   // slice() copies: buffer is reused
+  createImageBitmap(blob).then((bmp) => {
+    if (my > jpgShown) {
+      jpgShown = my;
+      if (bmp.width !== canvas.width || bmp.height !== canvas.height) {
+        canvas.width = bmp.width; canvas.height = bmp.height; applyView();
+      }
+      ctx.drawImage(bmp, 0, 0);
+      frames++;
+      if (!gotFrame) {
+        gotFrame = true;
+        rememberIp(host);               // reached the board: keep this IP for next time
+      }
+    }
+    bmp.close();
+  }).catch(() => {});
+}
+
+function feed(chunk) {
+  bytesIn += chunk.length;
+  lastData = performance.now();
+  fails = 0;
+  let off = 0;
+  while (off < chunk.length) {
+    if (state === 0) {
+      const n = Math.min(5 - geomFill, chunk.length - off);
+      geomBuf.set(chunk.subarray(off, off + n), geomFill);
+      geomFill += n; off += n;
+      if (geomFill === 5) {
+        W = geomBuf[0] | (geomBuf[1] << 8);
+        H = geomBuf[2] | (geomBuf[3] << 8);
+        FMT = geomBuf[4];
+        nonJpeg = FMT !== 5;
+        if (W && H && (canvas.width !== W || canvas.height !== H)) { canvas.width = W; canvas.height = H; applyView(); }
+        state = 1;
+      }
+    } else if (state === 1) {
+      const n = Math.min(5 - headFill, chunk.length - off);
+      headBuf.set(chunk.subarray(off, off + n), headFill);
+      headFill += n; off += n;
+      if (headFill === 5) {
+        payloadType = headBuf[0];
+        payloadLen = (headBuf[1] | (headBuf[2] << 8) | (headBuf[3] << 16)) + headBuf[4] * 16777216;
+        if (payloadLen > 0x4000000) throw new Error('corrupt stream');
+        if (payloadLen > sharedPayload.length) sharedPayload = new Uint8Array(Math.max(payloadLen, sharedPayload.length * 2));
+        payloadBuf = sharedPayload.subarray(0, payloadLen);
+        payloadFill = 0;
+        state = 2;
+      }
+    } else {
+      const n = Math.min(payloadLen - payloadFill, chunk.length - off);
+      payloadBuf.set(chunk.subarray(off, off + n), payloadFill);
+      payloadFill += n; off += n;
+      if (payloadFill === payloadLen) {
+        if (payloadType === 3) drawJpeg(payloadBuf); else nonJpeg = true;
+        state = 1;
+        headFill = 0;
+      }
+    }
+  }
+}
+
+/* ==================== connection ==================== */
+let running = false, host = '', gen = 0, ctl = null;
+
+function run() {
+  const my = ++gen;
+  if (ctl) { try { ctl.abort(); } catch (e) {} }
+  ctl = new AbortController();
+  resetParser();
+  lastData = performance.now();
+  fetch('http://' + host + '/stream?fmt=' + $('fmt').value, { cache: 'no-store', signal: ctl.signal })
+    .then((res) => {
+      if (!res.ok || !res.body) throw new Error('bad response');
+      const rd = res.body.getReader();
+      return (function pump() {
+        return rd.read().then((r) => {
+          if (my !== gen || r.done) return;
+          feed(r.value);
+          return pump();
+        });
+      })();
+    })
+    .catch(() => { if (my === gen) fails++; })
+    .then(() => {
+      if (my !== gen || !running) return;
+      setTimeout(() => { if (my === gen && running) run(); }, 800);
+    });
+}
+
+function connect() {
+  host = cleanHost($('ip').value);
+  if (!host) { statusEl.textContent = 'Enter the board IP.'; return; }
+  $('ip').value = host;
+  running = true;
+  gotFrame = false; nonJpeg = false; fails = 0;
+  $('connect').disabled = true;
+  $('disconnect').disabled = false;
+  updateWarn();
+  statusEl.textContent = 'Connecting to ' + host + '...';
+  run();
+  pollNet();
+}
+
+function disconnect() {
+  running = false;
+  gen++;
+  if (ctl) { try { ctl.abort(); } catch (e) {} }
+  $('connect').disabled = false;
+  $('disconnect').disabled = true;
+  $('net').textContent = '';
+  statusEl.textContent = 'Disconnected';
+}
+
+$('connect').addEventListener('click', connect);
+$('disconnect').addEventListener('click', disconnect);
+$('ip').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !running) connect(); });
+$('fmt').addEventListener('change', () => { if (running) run(); });
+
+function pollNet() {
+  if (!running) return;
+  fetch('http://' + host + '/net', { cache: 'no-store' })
+    .then((r) => r.json())
+    .then((d) => {
+      const p = [];
+      if (d.sta_up) p.push('STA ' + d.sta_ssid + ' ' + d.sta_ip + ' (' + d.rssi + ' dBm)');
+      if (d.ap_up) p.push('AP ' + d.ap_ssid + ' ' + d.ap_ip);
+      $('net').textContent = p.join('  |  ');
+    })
+    .catch(() => {});
+  setTimeout(pollNet, 5000);
+}
+
+setInterval(() => {
+  if (!running) return;
+  const now = performance.now();
+  if (now - fpsT >= 1000) {
+    const fps = frames * 1000 / (now - fpsT), kbps = bytesIn * 8 / (now - fpsT);
+    frames = 0; bytesIn = 0; fpsT = now;
+    if (nonJpeg) {
+      statusEl.textContent = 'The board is not sending JPEG (mode locked from the USB viewer). ' +
+        'In the USB viewer choose Mode: "Follow WiFi page" or a JPEG mode, then reconnect.';
+    } else if (gotFrame) {
+      statusEl.textContent = W + 'x' + H + '  ' + fps.toFixed(1) + ' fps  ' + kbps.toFixed(0) + ' kbps';
+    } else if (fails >= 2) {
+      statusEl.textContent = 'Cannot reach http://' + host + '/ . Check the IP, that you are on the same network ' +
+        '(or the ESP32-CAM hotspot), and the HTTPS note above.';
+    }
+  }
+  if (now - lastData > 5000) { lastData = now; run(); }     // stalled stream: restart
+}, 1000);
+
+/* ==================== AI ==================== */
+const GENERIC_LABELS = 'person, hand, face, cat, dog, car, bottle, cup, phone, laptop, keyboard, book, chair, table, plant, bag, tool, toy, food, LEGO piece';
+const LEGO_LABELS = [
+  '1x1 brick', '1x2 brick', '1x4 brick', '2x2 brick', '2x3 brick', '2x4 brick', 'round brick',
+  '1x1 plate', '1x2 plate', '1x4 plate', '2x2 plate', '2x4 plate', 'round plate', 'wedge plate',
+  '1x1 tile', '1x2 tile', '2x2 tile', 'slope brick', 'curved slope', 'arch brick',
+  'technic beam', 'technic brick with holes', 'technic axle', 'technic pin', 'technic gear',
+  'technic connector', 'wheel', 'tire', 'hinge', 'bracket', 'window frame', 'door',
+  'minifigure', 'minifigure head', 'minifigure torso', 'minifigure legs', 'motor', 'hub', 'sensor'
+].join(', ');
+
+const ENGINES = {
+  objects: { label: 'Objects: YOLOS-tiny (~7 MB, local)', kind: 'detect', task: 'object-detection', model: 'Xenova/yolos-tiny',
+             note: 'Finds and boxes common objects (80 COCO classes). Smallest and fastest.' },
+  caption: { label: 'Describe: ViT-GPT2 caption (~250 MB, local)', kind: 'caption', task: 'image-to-text', model: 'Xenova/vit-gpt2-image-captioning',
+             note: 'Writes one sentence about the whole image.' },
+  clip:    { label: 'Custom labels: CLIP (~90 MB, local)', kind: 'clip', task: 'zero-shot-image-classification', model: 'Xenova/clip-vit-base-patch32',
+             template: 'a photo of a {}.', labels: 'generic',
+             note: 'Ranks YOUR labels against the frame. Edit the label list freely.' },
+  lego:    { label: 'LEGO parts: CLIP with LEGO labels (local)', kind: 'clip', task: 'zero-shot-image-classification', model: 'Xenova/clip-vit-base-patch32',
+             template: 'a photo of a LEGO {}.', labels: 'lego',
+             note: 'Tells part families apart (brick / plate / tile / technic / minifig). It cannot read exact stud counts or part numbers: use Brickognize for that.' },
+  brick:   { label: 'LEGO parts: Brickognize (online, exact part IDs)', kind: 'brickognize',
+             note: 'Dedicated LEGO recognition service: returns part number + name. Sends the frame to api.brickognize.com. Put one piece on a plain background, close to the lens.' },
+  custom:  { label: 'Custom Hugging Face model (your own LEGO model)', kind: 'custom',
+             note: 'Any Transformers.js-compatible ONNX model. Paste a fine-tuned LEGO classifier id here when you have one.' }
+};
+
+const labelStore = { generic: GENERIC_LABELS, lego: LEGO_LABELS };
+let curLabelKey = null;
+
+const engineSel = $('engine');
+Object.keys(ENGINES).forEach((k) => {
+  const o = document.createElement('option');
+  o.value = k; o.textContent = ENGINES[k].label;
+  engineSel.appendChild(o);
+});
+if (!('gpu' in navigator)) { $('device').querySelector('option[value="webgpu"]').disabled = true; }
+
+function onEngine() {
+  const e = ENGINES[engineSel.value];
+  if (curLabelKey) labelStore[curLabelKey] = $('labels').value;
+  curLabelKey = e.labels || null;
+  $('labelsRow').hidden = !(e.kind === 'clip' || (e.kind === 'custom' && $('cTask').value === 'zero-shot-image-classification'));
+  if (e.labels) $('labels').value = labelStore[e.labels];
+  $('customRow').hidden = e.kind !== 'custom';
+  $('deviceRow').hidden = e.kind === 'brickognize';
+  $('aiNote').textContent = e.note;
+  lsSet('esp32cam.engine', engineSel.value);
+}
+engineSel.addEventListener('change', onEngine);
+$('cTask').addEventListener('change', () => {
+  $('labelsRow').hidden = $('cTask').value !== 'zero-shot-image-classification';
+  if (!$('labels').value.trim()) $('labels').value = labelStore.generic;
+});
+const savedEngine = lsGet('esp32cam.engine');
+if (savedEngine && ENGINES[savedEngine]) engineSel.value = savedEngine;
+const savedModel = lsGet('esp32cam.cmodel');
+if (savedModel) $('cModel').value = savedModel;
+onEngine();
+
+const aiProg = $('aiProg'), aiMsg = $('aiMsg');
+let tf = null;
+const pipes = {};
+let busy = false;
+
+async function loadTf() {
+  if (tf) return tf;
+  aiMsg.textContent = 'Loading AI library...';
+  tf = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3');
+  tf.env.allowLocalModels = false;
+  return tf;
+}
+
+function onProgress(p) {
+  if (p && p.status === 'progress' && typeof p.progress === 'number') {
+    aiProg.hidden = false;
+    aiProg.value = p.progress;
+    aiMsg.textContent = 'Downloading ' + (p.file || 'model') + ' ' + Math.round(p.progress) + '%';
+  }
+}
+
+async function getPipe(task, model, device) {
+  const key = task + '|' + model + '|' + device;
+  if (pipes[key]) return pipes[key];
+  const T = await loadTf();
+  aiMsg.textContent = 'Loading model ' + model + '...';
+  pipes[key] = await T.pipeline(task, model, {
+    device: device,
+    dtype: device === 'webgpu' ? 'fp32' : 'q8',
+    progress_callback: onProgress
+  });
+  aiProg.hidden = true;
+  return pipes[key];
+}
+
+function parseLabels() {
+  const l = $('labels').value.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+  if (l.length < 2) throw new Error('Give at least 2 labels.');
+  return l;
+}
+
+function normalize(out) {
+  const arr = Array.isArray(out) ? out : [out];
+  return arr.map((it) => {
+    if (it && it.generated_text !== undefined) return { label: it.generated_text };
+    return { label: it.label, score: it.score, box: it.box };
+  });
+}
+
+async function brickognize(url) {
+  const blob = await (await fetch(url)).blob();
+  const fd = new FormData();
+  fd.append('query_image', blob, 'frame.jpg');
+  let r;
+  try {
+    r = await fetch('https://api.brickognize.com/predict/parts/', { method: 'POST', body: fd });
+  } catch (e) {
+    throw new Error('Brickognize unreachable or blocked by the browser (' + e.message + '). Use the local CLIP engine instead.');
+  }
+  if (!r.ok) throw new Error('Brickognize HTTP ' + r.status);
+  const j = await r.json();
+  const items = (j.items || []).slice(0, 5);
+  if (!items.length) return [{ label: 'No part recognised. Try one piece, plain background, closer.' }];
+  return items.map((it) => {
+    const ext = it.external_sites && it.external_sites[0] && it.external_sites[0].url;
+    return {
+      label: it.id + '  ' + (it.name || ''),
+      score: it.score,
+      img: it.img_url,
+      link: ext && /^https:\/\//.test(ext) ? ext : ''
+    };
+  });
+}
+
+async function runEngine(key, url) {
+  const e = ENGINES[key], dev = $('device').value;
+  if (e.kind === 'brickognize') return brickognize(url);
+  if (e.kind === 'detect') {
+    const p = await getPipe(e.task, e.model, dev);
+    aiMsg.textContent = 'Analyzing...';
+    return normalize(await p(url, { threshold: 0.5, percentage: true }));
+  }
+  if (e.kind === 'caption') {
+    const p = await getPipe(e.task, e.model, dev);
+    aiMsg.textContent = 'Analyzing...';
+    return normalize(await p(url, { max_new_tokens: 40 }));
+  }
+  if (e.kind === 'clip') {
+    const p = await getPipe(e.task, e.model, dev);
+    aiMsg.textContent = 'Analyzing...';
+    const out = await p(url, parseLabels(), { hypothesis_template: e.template });
+    return normalize(out).sort((a, b) => b.score - a.score).slice(0, 5);
+  }
+  const model = $('cModel').value.trim(), task = $('cTask').value;
+  if (!model) throw new Error('Enter a model id.');
+  lsSet('esp32cam.cmodel', model);
+  const p = await getPipe(task, model, dev);
+  aiMsg.textContent = 'Analyzing...';
+  let out;
+  if (task === 'object-detection') out = await p(url, { threshold: 0.5, percentage: true });
+  else if (task === 'zero-shot-image-classification') out = await p(url, parseLabels());
+  else if (task === 'image-to-text') out = await p(url, { max_new_tokens: 40 });
+  else out = await p(url, { top_k: 5 });
+  return normalize(out).slice(0, 8);
+}
+
+function showResults(items, snap) {
+  const cv = $('aiCanvas'), list = $('aiList');
+  const hasBox = items.some((i) => i.box);
+  cv.hidden = !hasBox;
+  if (hasBox) {
+    cv.width = snap.width; cv.height = snap.height;
+    const c = cv.getContext('2d');
+    c.drawImage(snap, 0, 0);
+    c.lineWidth = 2; c.font = '13px system-ui,Arial'; c.textBaseline = 'top';
+    items.forEach((it) => {
+      if (!it.box) return;
+      const b = it.box, fr = b.xmax <= 1.01 && b.ymax <= 1.01;
+      const sx = fr ? snap.width : 1, sy = fr ? snap.height : 1;
+      const x = b.xmin * sx, y = b.ymin * sy, w = (b.xmax - b.xmin) * sx, h = (b.ymax - b.ymin) * sy;
+      c.strokeStyle = '#4cd964'; c.strokeRect(x, y, w, h);
+      const t = it.label + (it.score != null ? ' ' + Math.round(it.score * 100) + '%' : '');
+      const tw = c.measureText(t).width + 6;
+      c.fillStyle = '#4cd964'; c.fillRect(x, Math.max(0, y - 16), tw, 16);
+      c.fillStyle = '#000'; c.fillText(t, x + 3, Math.max(0, y - 15));
+    });
+  }
+  list.textContent = '';
+  if (!items.length) items = [{ label: 'Nothing found above the 50% threshold.' }];
+  items.forEach((it) => {
+    const li = document.createElement('li');
+    if (it.img) { const im = document.createElement('img'); im.src = it.img; im.alt = ''; li.appendChild(im); }
+    const span = document.createElement('span');
+    if (it.link) {
+      const a = document.createElement('a');
+      a.href = it.link; a.target = '_blank'; a.rel = 'noopener'; a.textContent = it.label;
+      span.appendChild(a);
+    } else {
+      span.textContent = it.label;
+    }
+    li.appendChild(span);
+    if (it.score != null) {
+      const sc = document.createElement('span');
+      sc.className = 'sc';
+      sc.textContent = Math.round(it.score * 100) + '%';
+      li.appendChild(sc);
+    }
+    list.appendChild(li);
+  });
+}
+
+function showError(msg) {
+  $('aiCanvas').hidden = true;
+  const list = $('aiList');
+  list.textContent = '';
+  const li = document.createElement('li');
+  const s = document.createElement('span');
+  s.className = 'err';
+  s.textContent = msg;
+  li.appendChild(s);
+  list.appendChild(li);
+}
+
+async function analyze() {
+  if (busy) return;
+  if (!gotFrame) { showError('No frame yet: connect to the board first.'); return; }
+  busy = true;
+  $('analyze').disabled = true;
+  const snap = document.createElement('canvas');
+  snap.width = canvas.width; snap.height = canvas.height;
+  snap.getContext('2d').drawImage(canvas, 0, 0);
+  const url = snap.toDataURL('image/jpeg', 0.92);
+  const t0 = performance.now();
+  try {
+    const items = await runEngine(engineSel.value, url);
+    showResults(items, snap);
+    aiMsg.textContent = 'Done in ' + ((performance.now() - t0) / 1000).toFixed(1) + ' s';
+  } catch (e) {
+    showError('AI error: ' + (e && e.message ? e.message : e));
+    aiMsg.textContent = '';
+  } finally {
+    aiProg.hidden = true;
+    busy = false;
+    $('analyze').disabled = false;
+  }
+}
+$('analyze').addEventListener('click', analyze);
+
+let autoTimer = null;
+function setAuto() {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  if ($('auto').checked) {
+    const s = Math.max(2, Math.min(120, parseInt($('autoSec').value, 10) || 5));
+    autoTimer = setInterval(() => { if (running && gotFrame) analyze(); }, s * 1000);
+  }
+}
+$('auto').addEventListener('change', setAuto);
+$('autoSec').addEventListener('change', setAuto);
+
+/* ==================== start: use ?ip= or the saved IP ==================== */
+fillRecent();
+const q = new URLSearchParams(location.search).get('ip');
+const startIp = cleanHost(q || lsGet(LS_IP) || '');
+if (startIp) $('ip').value = startIp;
+applyView();
+updateWarn();
+if (startIp) connect();      // saved IP: connect right away
+</script>
+</body>
+</html>
