@@ -4,122 +4,129 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ESP32 WiFi Viewer</title>
+<link rel="stylesheet" href="ui.css">
 <style>
-  :root{color-scheme:dark}
-  html,body{margin:0;background:#111;color:#eee;font-family:system-ui,Arial,sans-serif}
-  .wrap{max-width:980px;margin:0 auto;padding:12px;box-sizing:border-box;display:flex;flex-direction:column;gap:10px}
-  .bar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;font-size:13px;color:#9aa}
-  label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:#9aa}
-  label.inline{flex-direction:row;align-items:center;gap:6px;font-size:13px}
-  button,select,input[type=number],input[type=text],textarea{
-        background:#222;color:#eee;border:1px solid #444;border-radius:4px;padding:6px 10px;font-size:13px;font-family:inherit}
-  input[type=text]{width:180px}
-  input[type=number]{width:70px}
-  textarea{width:100%;box-sizing:border-box;min-height:64px;resize:vertical}
-  button{cursor:pointer}
-  button:hover{background:#333}
-  button:disabled{opacity:.4;cursor:default}
-  .primary{background:#1d5fd1;border-color:#2b74ea}
-  .primary:hover{background:#2368e0}
-  .stage{height:min(58vh,480px);min-height:160px;display:flex;align-items:center;justify-content:center;overflow:hidden}
-  canvas{display:block;background:#000;border:1px solid #333;border-radius:6px}
-  canvas:fullscreen{width:100vw !important;height:100vh !important;border:0;border-radius:0;object-fit:contain}
-  #status{font-size:13px;color:#9aa;text-align:center}
-  #net{font-size:12px;color:#789;text-align:center;min-height:14px}
-  #warn{background:#3a2f1a;border:1px solid #6a5a2c;color:#f0d9a4;border-radius:6px;padding:9px 12px;font-size:13px;line-height:1.5}
-  #warn a{color:#9cf}
-  details{font-size:13px;color:#9aa;background:#181818;border:1px solid #2a2a2a;border-radius:8px;padding:10px 14px}
-  summary{cursor:pointer;color:#cde;font-size:14px}
-  .grid{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:flex-end;margin:10px 0}
-  .hint{font-size:12px;color:#899;line-height:1.5;margin:6px 0}
-  progress{width:220px;height:10px;vertical-align:middle}
-  #aiMsg{font-size:12px;color:#9ab;margin-left:8px}
-  #aiCanvas{max-width:100%;height:auto;margin-top:10px}
-  #aiList{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
-  #aiList li{display:flex;gap:10px;align-items:center;background:#111;border:1px solid #2a2a2a;border-radius:6px;padding:6px 10px;color:#dbe4f0;font-size:13px}
-  #aiList img{width:48px;height:48px;object-fit:contain;background:#fff;border-radius:4px}
-  #aiList .sc{margin-left:auto;color:#7fd48f;font-variant-numeric:tabular-nums}
-  #aiList a{color:#9cf}
-  #aiList .err{color:#f0b4b4}
-  [hidden]{display:none !important}
+  .grid2{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(300px,1fr);gap:16px;align-items:start}
+  @media (max-width:920px){.grid2{grid-template-columns:1fr}}
+  .conn{flex-direction:row;align-items:flex-end;flex-wrap:wrap;gap:10px}
+  .conn .chip{align-self:center}
+  #status{font-size:13px}
+  #net{padding:0 12px 10px;min-height:0}
+  .presets{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .preset{flex-direction:column;align-items:flex-start;gap:2px;padding:10px 12px;white-space:normal;text-align:left}
+  .preset b{font-size:14px}
+  .preset small{color:var(--muted);font-size:11.5px;line-height:1.3}
+  .preset.on{border-color:var(--accent);background:rgba(59,130,246,.14)}
+  #aiMsg{font-size:12px;color:var(--muted);min-height:16px}
+  #aiCanvas{max-width:100%;height:auto;border-radius:8px;border:1px solid var(--line)}
+  #aiList{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+  #aiList li{display:flex;gap:10px;align-items:center;background:var(--panel2);border:1px solid var(--line);
+    border-radius:8px;padding:8px 10px;font-size:13px}
+  #aiList img{width:48px;height:48px;object-fit:contain;background:#fff;border-radius:6px;flex:none}
+  #aiList .sc{margin-left:auto;color:#9be9a8;font-variant-numeric:tabular-nums;font-weight:600}
+  #aiList .err{color:#ffaba5}
 </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="bar">
-    <label>Board IP
-      <input type="text" id="ip" list="recent" placeholder="192.168.x.x" autocomplete="off" spellcheck="false">
-    </label>
+<nav class="nav">
+  <span class="brand">ESP32 Cam</span>
+  <a href="index.html">Install</a>
+  <a href="wifi_viewer.html" class="on">WiFi viewer</a>
+  <a href="usb_viewer.html">USB viewer</a>
+</nav>
+
+<div class="page wide">
+  <div id="warn" class="notice warn" hidden></div>
+
+  <div class="card conn">
+    <label class="field grow"><span>Board IP</span>
+      <input type="text" id="ip" list="recent" placeholder="192.168.x.x" autocomplete="off" spellcheck="false"></label>
     <datalist id="recent"></datalist>
     <button id="connect" class="primary">Connect</button>
     <button id="disconnect" disabled>Disconnect</button>
-    <label>Mode
-      <select id="fmt">
-        <option value="jpg">Color JPEG</option>
-        <option value="jpgg">Gray JPEG</option>
-      </select>
-    </label>
-    <label>Scale
-      <select id="scale">
-        <option value="fit">Fit window</option>
-        <option value="1">1x</option>
-        <option value="2">2x</option>
-        <option value="3">3x</option>
-        <option value="4">4x</option>
-      </select>
-    </label>
-    <label class="inline"><input type="checkbox" id="smooth" checked> Smooth</label>
-    <button id="snap">Snapshot</button>
-    <button id="full">Fullscreen</button>
+    <span id="chip" class="chip"><i class="dot"></i><span id="chipText">Not connected</span></span>
   </div>
 
-  <div id="warn" hidden></div>
-
-  <div class="stage" id="stage"><canvas id="c" width="320" height="240"></canvas></div>
-  <div id="status">Not connected</div>
-  <div id="net"></div>
-
-  <details id="ai" open>
-    <summary>AI: what is in the image?</summary>
-    <p class="hint">Models run inside your browser (Transformers.js): free, no server, downloaded once then cached.
-       Only the "Brickognize" engine sends the frame to an online service.</p>
-    <div class="grid">
-      <label>Engine
-        <select id="engine"></select>
-      </label>
-      <label id="deviceRow">Run on
-        <select id="device">
-          <option value="wasm">CPU (WASM, small q8 models)</option>
-          <option value="webgpu">GPU (WebGPU, faster, bigger download)</option>
+  <div class="grid2">
+    <!-- ============ stream ============ -->
+    <section class="card flush">
+      <div class="stage" id="stage"><canvas id="c" width="320" height="240"></canvas></div>
+      <div class="toolbar">
+        <span id="status" class="muted">Not connected</span>
+        <span class="spacer"></span>
+        <select id="fmt" title="Stream mode">
+          <option value="jpg">Color</option>
+          <option value="jpgg">Gray</option>
         </select>
-      </label>
-      <button id="analyze" class="primary">Analyze this frame</button>
-      <label class="inline"><input type="checkbox" id="auto"> every
-        <input type="number" id="autoSec" value="5" min="2" max="120"> s</label>
-    </div>
-    <div id="labelsRow" hidden>
-      <label>Labels (comma separated, editable)
-        <textarea id="labels" spellcheck="false"></textarea>
-      </label>
-    </div>
-    <div id="customRow" class="grid" hidden>
-      <label>Hugging Face model id (ONNX / Transformers.js)
-        <input type="text" id="cModel" style="width:300px" placeholder="user/your-lego-model" spellcheck="false">
-      </label>
-      <label>Task
-        <select id="cTask">
-          <option value="image-classification">image-classification</option>
-          <option value="zero-shot-image-classification">zero-shot-image-classification</option>
-          <option value="object-detection">object-detection</option>
-          <option value="image-to-text">image-to-text</option>
+        <select id="scale" title="Scale">
+          <option value="fit">Fit</option>
+          <option value="1">1x</option>
+          <option value="2">2x</option>
+          <option value="3">3x</option>
+          <option value="4">4x</option>
         </select>
-      </label>
-    </div>
-    <p class="hint" id="aiNote"></p>
-    <div><progress id="aiProg" max="100" value="0" hidden></progress><span id="aiMsg"></span></div>
-    <canvas id="aiCanvas" hidden></canvas>
-    <ul id="aiList"></ul>
-  </details>
+        <label class="check"><input type="checkbox" id="smooth" checked> Smooth</label>
+        <button id="snap">Snapshot</button>
+        <button id="full">Fullscreen</button>
+      </div>
+      <div id="net" class="muted small"></div>
+    </section>
+
+    <!-- ============ AI ============ -->
+    <section class="card" id="ai">
+      <div>
+        <h2>What's in the image?</h2>
+        <p class="muted small" style="margin:2px 0 0">Click one: it analyzes the current frame. Models run in your browser and download once.</p>
+      </div>
+
+      <div class="presets">
+        <button class="preset" data-engine="objects"><b>Objects</b><small>Finds and boxes things &middot; 7 MB</small></button>
+        <button class="preset" data-engine="caption"><b>Describe</b><small>One sentence &middot; 250 MB</small></button>
+        <button class="preset" data-engine="brick"><b>LEGO part</b><small>Exact part ID &middot; online</small></button>
+        <button class="preset" data-engine="lego"><b>LEGO family</b><small>Brick / plate / technic &middot; 90 MB offline</small></button>
+      </div>
+
+      <progress id="aiProg" max="100" value="0" hidden></progress>
+      <div id="aiMsg"></div>
+      <canvas id="aiCanvas" hidden></canvas>
+      <ul id="aiList"></ul>
+
+      <details>
+        <summary>Advanced</summary>
+        <div class="row">
+          <label class="field grow"><span>Engine</span><select id="engine"></select></label>
+          <label class="field" id="deviceRow"><span>Run on</span>
+            <select id="device">
+              <option value="wasm">CPU (small q8 models)</option>
+              <option value="webgpu">GPU (WebGPU, bigger download)</option>
+            </select>
+          </label>
+        </div>
+        <div id="labelsRow" style="margin-top:10px" hidden>
+          <label class="field"><span>Labels (comma separated, editable)</span>
+            <textarea id="labels" spellcheck="false"></textarea></label>
+        </div>
+        <div id="customRow" class="row" style="margin-top:10px" hidden>
+          <label class="field grow"><span>Hugging Face model id (ONNX / Transformers.js)</span>
+            <input type="text" id="cModel" placeholder="user/your-lego-model" spellcheck="false"></label>
+          <label class="field"><span>Task</span>
+            <select id="cTask">
+              <option value="image-classification">image-classification</option>
+              <option value="zero-shot-image-classification">zero-shot-image-classification</option>
+              <option value="object-detection">object-detection</option>
+              <option value="image-to-text">image-to-text</option>
+            </select>
+          </label>
+        </div>
+        <p class="small muted" id="aiNote" style="margin:10px 0"></p>
+        <div class="row center">
+          <button id="analyze">Run selected engine</button>
+          <label class="check"><input type="checkbox" id="auto"> auto every</label>
+          <input type="number" id="autoSec" value="5" min="2" max="120"> <span class="muted small">s</span>
+        </div>
+      </details>
+    </section>
+  </div>
 </div>
 
 <script type="module">
@@ -152,6 +159,11 @@ function cleanHost(s) {
 /* ==================== view ==================== */
 const canvas = $('c'), ctx = canvas.getContext('2d', { alpha: false });
 const stage = $('stage'), statusEl = $('status'), scaleEl = $('scale'), smoothEl = $('smooth');
+
+function setChip(kind, text) {
+  $('chip').className = 'chip' + (kind ? ' ' + kind : '');
+  $('chipText').textContent = text;
+}
 
 function applyView() {
   canvas.style.imageRendering = smoothEl.checked ? 'auto' : 'pixelated';
@@ -190,8 +202,8 @@ function updateWarn() {
   if (location.protocol !== 'https:') { w.hidden = true; return; }
   const h = cleanHost($('ip').value);
   w.hidden = false;
-  w.textContent = 'This page is served over HTTPS, so the browser will probably block the http:// stream from the board. ' +
-    'Fix: open this viewer over http:// or from a local file, or allow "Insecure content" for this site ' +
+  w.textContent = 'This page is on HTTPS, so the browser will probably block the http:// stream from the board. ' +
+    'Open this viewer over http:// or from a local file, allow "Insecure content" for this site ' +
     '(lock icon > Site settings), or use the board\'s own page: ';
   if (h) {
     const a = document.createElement('a');
@@ -214,6 +226,7 @@ let sharedPayload = new Uint8Array(1 << 16);
 const geomBuf = new Uint8Array(5), headBuf = new Uint8Array(5);
 let frames = 0, bytesIn = 0, fpsT = performance.now(), lastData = performance.now();
 let gotFrame = false, nonJpeg = false, fails = 0, jpgSeq = 0, jpgShown = 0;
+let running = false, host = '', gen = 0, ctl = null;
 
 function resetParser() { state = 0; geomFill = 0; headFill = 0; payloadFill = 0; }
 
@@ -231,6 +244,7 @@ function drawJpeg(payload) {
       if (!gotFrame) {
         gotFrame = true;
         rememberIp(host);               // reached the board: keep this IP for next time
+        setChip('live', 'Live');
       }
     }
     bmp.close();
@@ -282,8 +296,6 @@ function feed(chunk) {
 }
 
 /* ==================== connection ==================== */
-let running = false, host = '', gen = 0, ctl = null;
-
 function run() {
   const my = ++gen;
   if (ctl) { try { ctl.abort(); } catch (e) {} }
@@ -311,13 +323,14 @@ function run() {
 
 function connect() {
   host = cleanHost($('ip').value);
-  if (!host) { statusEl.textContent = 'Enter the board IP.'; return; }
+  if (!host) { statusEl.textContent = 'Enter the board IP.'; setChip('err', 'No IP'); return; }
   $('ip').value = host;
   running = true;
   gotFrame = false; nonJpeg = false; fails = 0;
   $('connect').disabled = true;
   $('disconnect').disabled = false;
   updateWarn();
+  setChip('wait', 'Connecting...');
   statusEl.textContent = 'Connecting to ' + host + '...';
   run();
   pollNet();
@@ -330,6 +343,7 @@ function disconnect() {
   $('connect').disabled = false;
   $('disconnect').disabled = true;
   $('net').textContent = '';
+  setChip('', 'Not connected');
   statusEl.textContent = 'Disconnected';
 }
 
@@ -344,8 +358,8 @@ function pollNet() {
     .then((r) => r.json())
     .then((d) => {
       const p = [];
-      if (d.sta_up) p.push('STA ' + d.sta_ssid + ' ' + d.sta_ip + ' (' + d.rssi + ' dBm)');
-      if (d.ap_up) p.push('AP ' + d.ap_ssid + ' ' + d.ap_ip);
+      if (d.sta_up) p.push('WiFi ' + d.sta_ssid + ' ' + d.sta_ip + ' (' + d.rssi + ' dBm)');
+      if (d.ap_up) p.push('Hotspot ' + d.ap_ssid + ' ' + d.ap_ip);
       $('net').textContent = p.join('  |  ');
     })
     .catch(() => {});
@@ -359,11 +373,13 @@ setInterval(() => {
     const fps = frames * 1000 / (now - fpsT), kbps = bytesIn * 8 / (now - fpsT);
     frames = 0; bytesIn = 0; fpsT = now;
     if (nonJpeg) {
+      setChip('err', 'Wrong mode');
       statusEl.textContent = 'The board is not sending JPEG (mode locked from the USB viewer). ' +
-        'In the USB viewer choose Mode: "Follow WiFi page" or a JPEG mode, then reconnect.';
+        'In the USB viewer pick Mode "Follow WiFi page" or a JPEG mode, then reconnect.';
     } else if (gotFrame) {
       statusEl.textContent = W + 'x' + H + '  ' + fps.toFixed(1) + ' fps  ' + kbps.toFixed(0) + ' kbps';
     } else if (fails >= 2) {
+      setChip('err', 'Unreachable');
       statusEl.textContent = 'Cannot reach http://' + host + '/ . Check the IP, that you are on the same network ' +
         '(or the ESP32-CAM hotspot), and the HTTPS note above.';
     }
@@ -390,10 +406,10 @@ const ENGINES = {
   clip:    { label: 'Custom labels: CLIP (~90 MB, local)', kind: 'clip', task: 'zero-shot-image-classification', model: 'Xenova/clip-vit-base-patch32',
              template: 'a photo of a {}.', labels: 'generic',
              note: 'Ranks YOUR labels against the frame. Edit the label list freely.' },
-  lego:    { label: 'LEGO parts: CLIP with LEGO labels (local)', kind: 'clip', task: 'zero-shot-image-classification', model: 'Xenova/clip-vit-base-patch32',
+  lego:    { label: 'LEGO family: CLIP with LEGO labels (local)', kind: 'clip', task: 'zero-shot-image-classification', model: 'Xenova/clip-vit-base-patch32',
              template: 'a photo of a LEGO {}.', labels: 'lego',
-             note: 'Tells part families apart (brick / plate / tile / technic / minifig). It cannot read exact stud counts or part numbers: use Brickognize for that.' },
-  brick:   { label: 'LEGO parts: Brickognize (online, exact part IDs)', kind: 'brickognize',
+             note: 'Tells part families apart (brick / plate / tile / technic / minifig). It cannot read exact stud counts or part numbers: use "LEGO part" for that.' },
+  brick:   { label: 'LEGO part: Brickognize (online, exact IDs)', kind: 'brickognize',
              note: 'Dedicated LEGO recognition service: returns part number + name. Sends the frame to api.brickognize.com. Put one piece on a plain background, close to the lens.' },
   custom:  { label: 'Custom Hugging Face model (your own LEGO model)', kind: 'custom',
              note: 'Any Transformers.js-compatible ONNX model. Paste a fine-tuned LEGO classifier id here when you have one.' }
@@ -419,12 +435,20 @@ function onEngine() {
   $('customRow').hidden = e.kind !== 'custom';
   $('deviceRow').hidden = e.kind === 'brickognize';
   $('aiNote').textContent = e.note;
+  document.querySelectorAll('.preset').forEach((b) => b.classList.toggle('on', b.dataset.engine === engineSel.value));
   lsSet('esp32cam.engine', engineSel.value);
 }
 engineSel.addEventListener('change', onEngine);
 $('cTask').addEventListener('change', () => {
   $('labelsRow').hidden = $('cTask').value !== 'zero-shot-image-classification';
   if (!$('labels').value.trim()) $('labels').value = labelStore.generic;
+});
+document.querySelectorAll('.preset').forEach((b) => {
+  b.addEventListener('click', () => {
+    engineSel.value = b.dataset.engine;
+    onEngine();
+    analyze();
+  });
 });
 const savedEngine = lsGet('esp32cam.engine');
 if (savedEngine && ENGINES[savedEngine]) engineSel.value = savedEngine;
@@ -489,7 +513,7 @@ async function brickognize(url) {
   try {
     r = await fetch('https://api.brickognize.com/predict/parts/', { method: 'POST', body: fd });
   } catch (e) {
-    throw new Error('Brickognize unreachable or blocked by the browser (' + e.message + '). Use the local CLIP engine instead.');
+    throw new Error('Brickognize unreachable or blocked by the browser (' + e.message + '). Try "LEGO family" (offline) instead.');
   }
   if (!r.ok) throw new Error('Brickognize HTTP ' + r.status);
   const j = await r.json();
@@ -508,7 +532,7 @@ async function brickognize(url) {
 
 async function runEngine(key, url) {
   const e = ENGINES[key], dev = $('device').value;
-  if (e.kind === 'brickognize') return brickognize(url);
+  if (e.kind === 'brickognize') { aiMsg.textContent = 'Asking Brickognize...'; return brickognize(url); }
   if (e.kind === 'detect') {
     const p = await getPipe(e.task, e.model, dev);
     aiMsg.textContent = 'Analyzing...';
@@ -526,7 +550,7 @@ async function runEngine(key, url) {
     return normalize(out).sort((a, b) => b.score - a.score).slice(0, 5);
   }
   const model = $('cModel').value.trim(), task = $('cTask').value;
-  if (!model) throw new Error('Enter a model id.');
+  if (!model) throw new Error('Enter a model id (Advanced).');
   lsSet('esp32cam.cmodel', model);
   const p = await getPipe(task, model, dev);
   aiMsg.textContent = 'Analyzing...';
@@ -600,6 +624,7 @@ async function analyze() {
   if (!gotFrame) { showError('No frame yet: connect to the board first.'); return; }
   busy = true;
   $('analyze').disabled = true;
+  document.querySelectorAll('.preset').forEach((b) => { b.disabled = true; });
   const snap = document.createElement('canvas');
   snap.width = canvas.width; snap.height = canvas.height;
   snap.getContext('2d').drawImage(canvas, 0, 0);
@@ -616,6 +641,7 @@ async function analyze() {
     aiProg.hidden = true;
     busy = false;
     $('analyze').disabled = false;
+    document.querySelectorAll('.preset').forEach((b) => { b.disabled = false; });
   }
 }
 $('analyze').addEventListener('click', analyze);

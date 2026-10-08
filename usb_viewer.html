@@ -4,46 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ESP32 USB Camera</title>
+<link rel="stylesheet" href="ui.css">
 <style>
-  html,body{height:100%;margin:0;background:#111;color:#eee;
-            font-family:system-ui,Arial,sans-serif}
-  .wrap{height:100%;box-sizing:border-box;padding:12px;display:flex;
-        flex-direction:column;gap:10px;overflow:auto}
-  .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;color:#9aa}
-  button,select,input[type=number],input[type=text],input[type=password]{
-        background:#222;color:#eee;border:1px solid #444;
-        border-radius:4px;padding:6px 10px;font-size:13px}
-  input[type=number]{width:90px}
-  input[type=text],input[type=password]{width:150px}
-  button{cursor:pointer}
-  button:disabled{opacity:.4;cursor:default}
-  .stage{flex:1 1 0;min-height:140px;display:flex;align-items:center;
-         justify-content:center;overflow:hidden}
-  canvas{display:block;background:#000;border:1px solid #333;border-radius:6px}
-  canvas:fullscreen{width:100vw !important;height:100vh !important;
-                    border:0;border-radius:0;object-fit:contain}
-  #status{font-size:13px;color:#9aa;text-align:center}
-  details{font-size:13px;color:#9aa;background:#181818;border:1px solid #2a2a2a;
-          border-radius:6px;padding:8px 12px}
-  summary{cursor:pointer;color:#cde}
-  .grid{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;margin:10px 0}
-  .grp{display:flex;gap:8px;align-items:center}
-  #board{margin-top:6px;color:#8c9;line-height:1.5}
-  #toasts{position:fixed;right:14px;bottom:14px;z-index:9999;
-          display:flex;flex-direction:column;gap:8px;align-items:flex-end;
-          max-width:min(440px,86vw);pointer-events:none}
-  .toast{pointer-events:auto;background:#1b2029;border:1px solid #38414f;
-         border-left:4px solid #4a9eff;border-radius:6px;padding:9px 12px;
-         font-size:12.5px;line-height:1.45;color:#dbe4f0;
-         box-shadow:0 8px 22px rgba(0,0,0,.55);
-         white-space:pre-wrap;word-break:break-word;
-         animation:tin .18s ease-out}
-  .toast .tt{display:block;font-weight:600;color:#fff;margin-bottom:2px}
-  .toast.text{border-left-color:#ffb454}
-  .toast.err{border-left-color:#ff5f56}
-  .toast.ok{border-left-color:#4cd964}
-  .toast.fade{opacity:0;transition:opacity .3s}
-  @keyframes tin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  #status{font-size:13px;white-space:normal;max-width:100%;border-radius:10px}
+  #board{color:#8fd19e;line-height:1.6;font-size:13px}
+  .settings-grid{display:flex;flex-wrap:wrap;gap:12px 22px;align-items:flex-end}
+  .grp{display:flex;gap:8px;align-items:flex-end}
+  .grp input[type=number]{width:90px}
+  .grp input[type=text],.grp input[type=password]{width:150px}
 </style>
 <script>
 /* Kill the Netlify "hud" badge as early as possible. */
@@ -70,31 +38,46 @@
 </script>
 </head>
 <body>
-<div class="wrap">
-  <div class="bar">
-    <button id="connect">Connect</button>
+<nav class="nav">
+  <span class="brand">ESP32 Cam</span>
+  <a href="index.html">Install</a>
+  <a href="wifi_viewer.html">WiFi viewer</a>
+  <a href="usb_viewer.html" class="on">USB viewer</a>
+</nav>
+
+<div class="page wide">
+  <div class="card conn" style="flex-direction:row;flex-wrap:wrap;align-items:flex-end">
+    <button id="connect" class="primary">Connect</button>
     <button id="disconnect" disabled>Disconnect</button>
-    <label>Baud <input id="baud" type="number" value="115200"></label>
-    <label>Scale
-      <select id="scale">
-        <option value="fit">Fit window</option>
-        <option value="1">1x</option>
-        <option value="2">2x</option>
-        <option value="3">3x</option>
-        <option value="4">4x</option>
-      </select>
-    </label>
-    <label><input type="checkbox" id="smooth" checked> Smooth</label>
-    <button id="snap">Snapshot</button>
-    <button id="full">Fullscreen</button>
+    <label class="field"><span>Baud</span><input id="baud" type="number" value="115200"></label>
+    <span class="spacer"></span>
+    <span id="status" class="chip">Not connected</span>
   </div>
-  <div class="stage" id="stage"><canvas id="c" width="320" height="240"></canvas></div>
-  <div id="status">Not connected</div>
-  <details id="settings">
+
+  <section class="card flush">
+    <div class="stage" id="stage"><canvas id="c" width="320" height="240"></canvas></div>
+    <div class="toolbar">
+      <label class="check">Scale
+        <select id="scale">
+          <option value="fit">Fit</option>
+          <option value="1">1x</option>
+          <option value="2">2x</option>
+          <option value="3">3x</option>
+          <option value="4">4x</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" id="smooth" checked> Smooth</label>
+      <span class="spacer"></span>
+      <button id="snap">Snapshot</button>
+      <button id="full">Fullscreen</button>
+    </div>
+  </section>
+
+  <details id="settings" class="card" style="gap:0">
     <summary>Board settings (WiFi stream and USB)</summary>
-    <div class="grid">
+    <div class="settings-grid">
       <div class="grp">
-        <label>Mode
+        <label class="field"><span>Mode</span>
           <select id="s_mode">
             <option value="free">Follow WiFi page</option>
             <option value="jpg">Color JPEG</option>
@@ -108,7 +91,7 @@
         <button id="a_mode" disabled>Apply</button>
       </div>
       <div class="grp">
-        <label>WiFi JPEG quality
+        <label class="field"><span>WiFi JPEG quality</span>
           <select id="s_q">
             <option value="auto">Auto</option>
             <option value="0">20</option>
@@ -120,16 +103,16 @@
         <button id="a_q" disabled>Apply</button>
       </div>
       <div class="grp">
-        <label>USB JPEG quality
+        <label class="field"><span>USB JPEG quality</span>
           <input id="s_usbq" type="number" min="1" max="100" value="60">
         </label>
         <button id="a_usbq" disabled>Apply</button>
       </div>
     </div>
-    <div class="grid">
+    <div class="settings-grid" style="margin-top:14px">
       <div class="grp">
-        <label>WiFi SSID <input id="s_ssid" type="text" autocomplete="off"></label>
-        <label>Password <input id="s_pw" type="password" autocomplete="off"></label>
+        <label class="field"><span>WiFi name</span><input id="s_ssid" type="text" autocomplete="off"></label>
+        <label class="field"><span>Password</span><input id="s_pw" type="password" autocomplete="off"></label>
         <button id="a_wifi" disabled>Save and connect</button>
       </div>
       <div class="grp">
@@ -137,7 +120,7 @@
         <button id="a_reboot" disabled>Reboot board</button>
       </div>
     </div>
-    <div id="board">-</div>
+    <div id="board" style="margin-top:12px">-</div>
   </details>
 </div>
 <div id="toasts"></div>

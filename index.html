@@ -3,128 +3,91 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ESP32 Camera Installer</title>
-<style>
-  :root{color-scheme:dark}
-  html,body{margin:0;background:#111;color:#eee;font-family:system-ui,Arial,sans-serif}
-  .page{max-width:760px;margin:0 auto;padding:24px 16px 60px}
-  h1{font-size:22px;margin:0 0 4px}
-  h2{font-size:16px;margin:0 0 8px}
-  .sub{color:#9aa;margin:0 0 20px;font-size:14px}
-  .card{background:#181818;border:1px solid #2a2a2a;border-radius:8px;padding:16px;margin-bottom:16px}
-  p{font-size:14px;line-height:1.5;color:#bcc;margin:0 0 10px}
-  code{background:#222;border-radius:4px;padding:1px 5px;font-size:13px}
-  .row{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin:10px 0}
-  label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:#9aa}
-  input[type=text],input[type=password]{background:#222;color:#eee;border:1px solid #444;
-        border-radius:4px;padding:7px 10px;font-size:14px;width:200px}
-  button,.btn{background:#2a2a2a;color:#eee;border:1px solid #444;border-radius:6px;
-        padding:9px 16px;font-size:14px;cursor:pointer;text-decoration:none;display:inline-block}
-  button:hover,.btn:hover{background:#333}
-  button:disabled{opacity:.4;cursor:default}
-  .primary{background:#1d5fd1;border-color:#2b74ea}
-  .primary:hover{background:#2368e0}
-  .good{background:#1a7f3c;border-color:#23a14d}
-  .good:hover{background:#1f9247}
-  progress{width:200px;height:10px}
-  #src{font-size:13px;margin-bottom:8px}
-  #src.ok{color:#7fd48f}
-  #src.warn{color:#e8b25c}
-  details{font-size:13px;color:#9aa;margin:8px 0}
-  summary{cursor:pointer}
-  pre{background:#0c0c0c;border:1px solid #2a2a2a;border-radius:6px;padding:10px;
-      font-size:12px;line-height:1.5;max-height:220px;overflow:auto;white-space:pre-wrap;
-      margin:10px 0 0;min-height:20px;color:#bcd}
-  #unsupported{display:none;background:#3a1f1f;border:1px solid #6a2c2c;color:#f0b4b4;
-      border-radius:6px;padding:10px 12px;font-size:13px;margin-bottom:16px}
-  ol{font-size:14px;line-height:1.6;color:#bcc;margin:0 0 10px;padding-left:20px}
-  .hint{font-size:12px;color:#899;margin:0}
-  .sep{border:0;border-top:1px solid #2a2a2a;margin:14px 0}
-  .toggle{display:flex;flex-direction:row;align-items:center;gap:6px;
-          font-size:13px;color:#bcc}
-  .toggle input{width:auto}
-  [hidden]{display:none !important}
-</style>
+<title>ESP32 Camera</title>
+<link rel="stylesheet" href="ui.css">
 </head>
 <body>
+<nav class="nav">
+  <span class="brand">ESP32 Cam</span>
+  <a href="index.html" class="on">Install</a>
+  <a href="wifi_viewer.html">WiFi viewer</a>
+  <a href="usb_viewer.html">USB viewer</a>
+</nav>
+
 <div class="page">
-  <h1>ESP32 Camera</h1>
-  <p class="sub">Install the camera script over USB, then watch it over USB or WiFi.</p>
+  <div>
+    <h1>ESP32 Camera</h1>
+    <p class="lead">Install the camera script over USB, then watch it over WiFi (with AI) or USB.</p>
+  </div>
 
-  <div id="unsupported">This browser has no Web Serial. Use Chrome or Edge on a PC.</div>
+  <div id="unsupported" class="notice bad" hidden>This browser has no Web Serial. Use Chrome or Edge on a PC. You can still open the WiFi viewer below.</div>
 
+  <!-- ============ 1. INSTALL ============ -->
   <section class="card">
-    <h2>1. Install</h2>
-    <p>Fetches <code>main.py</code> from this site and writes it to the board over USB
-       at 115200 baud. Close Thonny or any serial monitor first. When it is done, the
-       installer asks the board for its WiFi IP and saves it for the WiFi viewer.</p>
-    <div id="src">Checking main.py...</div>
-    <details id="local">
-      <summary>Use a local file instead</summary>
-      <p style="margin-top:8px"><input type="file" id="file" accept=".py"></p>
+    <div class="card-head">
+      <span class="step">1</span>
+      <h2>Install on the board</h2>
+      <span class="spacer"></span>
+      <span id="stage" class="chip"><i class="dot"></i><span id="stageText">Ready</span></span>
+    </div>
+    <p class="muted" style="margin:0">Plug the board in, close Thonny / any serial monitor, enter your WiFi, press Install.
+      The installer then restarts the board and reads its IP for you.</p>
+
+    <div class="row">
+      <label class="field grow"><span>WiFi name (leave empty to keep the saved one)</span>
+        <input type="text" id="ssid" autocomplete="off"></label>
+      <label class="field grow"><span>WiFi password</span>
+        <input type="password" id="pw" autocomplete="off"></label>
+    </div>
+    <label class="check"><input type="checkbox" id="showPw"> Show password</label>
+
+    <div class="row center">
+      <button id="install" class="primary big">Install main.py</button>
+      <progress id="prog" value="0" max="100" hidden style="flex:1;min-width:140px"></progress>
+    </div>
+    <pre id="log" class="log" hidden></pre>
+
+    <details>
+      <summary>Advanced: hotspot (AP) and local file</summary>
+      <div class="row center" style="margin-bottom:10px">
+        <label class="check"><input type="checkbox" id="apEnable" checked> Camera makes its own hotspot at boot (http://192.168.4.1/)</label>
+      </div>
+      <div class="row">
+        <label class="field grow"><span>AP name</span><input type="text" id="apSsid" value="ESP32-CAM" autocomplete="off"></label>
+        <label class="field grow"><span>AP password (8+ chars, blank = open)</span><input type="password" id="apPw" value="12345678" autocomplete="off"></label>
+      </div>
+      <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+      <div id="src" class="small muted">Checking main.py...</div>
+      <div id="local" style="margin-top:6px">
+        <span class="small muted">Use a local main.py instead:</span>
+        <input type="file" id="file" accept=".py" class="small">
+      </div>
     </details>
-
-    <hr class="sep">
-
-    <h2 style="font-size:14px">WiFi &mdash; STA (join your router)</h2>
-    <p class="hint">Optional. Leave empty to keep the network already saved on the board.</p>
-    <div class="row">
-      <label>WiFi name<input type="text" id="ssid" autocomplete="off"></label>
-      <label>WiFi password<input type="password" id="pw" autocomplete="off"></label>
-    </div>
-
-    <hr class="sep">
-
-    <h2 style="font-size:14px">WiFi &mdash; AP (camera makes its own hotspot)</h2>
-    <p class="hint">Runs alongside STA. Browse to <code>http://192.168.4.1/</code> after joining.</p>
-    <div class="row">
-      <label class="toggle">
-        <input type="checkbox" id="apEnable" checked>
-        Enable AP at boot
-      </label>
-    </div>
-    <div class="row">
-      <label>AP SSID<input type="text" id="apSsid" value="ESP32-CAM" autocomplete="off"></label>
-      <label>AP password (min 8 chars, or blank = open)<input type="password" id="apPw" value="12345678" autocomplete="off"></label>
-    </div>
-
-    <hr class="sep">
-
-    <div class="row">
-      <button id="install" class="primary">Install main.py</button>
-      <progress id="prog" value="0" max="100" hidden></progress>
-    </div>
-    <pre id="log"></pre>
   </section>
 
+  <!-- ============ 2. OPEN ============ -->
   <section class="card">
-    <h2>2. USB viewer</h2>
-    <ol>
-      <li>After installing, the board restarts. Wait about 5 seconds.</li>
-      <li>Open the viewer and press Connect (it uses 921600 baud).</li>
-      <li>To install again later, press <b>Exit to REPL</b> in the viewer first, or press the board's RESET button right after pressing Install.</li>
-    </ol>
-    <a class="btn" id="viewer" href="usb_viewer.html">Open USB viewer</a>
-  </section>
+    <div class="card-head">
+      <span class="step">2</span>
+      <h2>Open the camera</h2>
+      <span class="spacer"></span>
+      <span id="ipChip" class="chip"><i class="dot"></i><span id="ipChipText">No IP saved</span></span>
+    </div>
 
-  <section class="card">
-    <h2>3. WiFi viewer (+ AI)</h2>
-    <p>Watch the stream from the board's local IP and run small AI models on the frame
-       (objects, description, LEGO parts). The IP is filled in by the installer; you can
-       always type or change it.</p>
     <div class="row">
-      <label>Board IP
-        <input type="text" id="camIp" list="recentIps" placeholder="192.168.x.x" autocomplete="off" spellcheck="false">
-      </label>
+      <label class="field grow"><span>Board IP (filled in by the installer, you can edit it)</span>
+        <input type="text" id="camIp" list="recentIps" placeholder="192.168.x.x" autocomplete="off" spellcheck="false"></label>
       <datalist id="recentIps"></datalist>
-      <a class="btn primary" id="wifiViewer" href="wifi_viewer.html">Open WiFi viewer</a>
+      <a class="btn primary big" id="wifiViewer" href="wifi_viewer.html">Open WiFi viewer</a>
+    </div>
+
+    <div class="row center">
+      <button id="findIp">Find IP over USB</button>
+      <a class="btn" href="usb_viewer.html">USB viewer</a>
       <a class="btn" id="direct" href="#" target="_blank" rel="noopener" hidden>Board's own page</a>
     </div>
-    <div class="row">
-      <button id="findIp">Find IP over USB</button>
-      <span class="hint">Board already installed? Plug it in and press this (needs the camera script running, not the REPL).</span>
-    </div>
-    <p class="hint" id="ipState"></p>
+    <p class="small muted" style="margin:0">"Find IP over USB" resets and restarts the board, then asks it for its WiFi IP.
+      To install again later, press <b>Exit to REPL</b> in the USB viewer first.</p>
   </section>
 </div>
 
@@ -137,13 +100,23 @@
   var mainBytes = null, usingLocal = false;
   var port = null, reader = null, writer = null, reading = false, readDone = null, rx = '';
 
-  if (!('serial' in navigator)) $('unsupported').style.display = 'block';
+  if (!('serial' in navigator)) $('unsupported').hidden = false;
 
   function log(msg) {
     var el = $('log');
+    el.hidden = false;
     el.textContent += msg + '\n';
     el.scrollTop = el.scrollHeight;
   }
+
+  function setStage(text, kind) {          // kind: '' | wait | live | err
+    $('stage').className = 'chip' + (kind ? ' ' + kind : '');
+    $('stageText').textContent = text;
+  }
+
+  $('showPw').addEventListener('change', function () {
+    $('pw').type = $('showPw').checked ? 'text' : 'password';
+  });
 
   // ---- saved board IP (shared with wifi_viewer.html through localStorage) ----
   var LS_IP = 'esp32cam.ip', LS_RECENT = 'esp32cam.recent';
@@ -169,6 +142,14 @@
     $('wifiViewer').href = 'wifi_viewer.html' + (ip ? '?ip=' + encodeURIComponent(ip) : '');
     $('direct').hidden = !ip;
     $('direct').href = ip ? 'http://' + ip + '/' : '#';
+    var saved = cleanHost(lsGet(LS_IP) || '');
+    if (ip && ip === saved) {
+      $('ipChip').className = 'chip live';
+      $('ipChipText').textContent = 'IP saved';
+    } else {
+      $('ipChip').className = 'chip' + (ip ? ' wait' : '');
+      $('ipChipText').textContent = ip ? 'Not saved yet (press Enter)' : 'No IP saved';
+    }
   }
   function saveIp(ip) {
     ip = cleanHost(ip);
@@ -182,13 +163,10 @@
     updateLinks();
   }
   $('camIp').addEventListener('input', updateLinks);
-  $('camIp').addEventListener('change', function () {
-    var ip = cleanHost($('camIp').value);
-    if (ip) { saveIp(ip); $('ipState').textContent = 'IP saved: ' + ip; }
-  });
+  $('camIp').addEventListener('change', function () { saveIp($('camIp').value); });
   (function initIp() {
     var ip = cleanHost(lsGet(LS_IP) || '');
-    if (ip) { $('camIp').value = ip; $('ipState').textContent = 'Saved IP: ' + ip; }
+    if (ip) $('camIp').value = ip;
     fillRecent();
     updateLinks();
   })();
@@ -200,17 +178,15 @@
       if (!r.ok) throw new Error('HTTP ' + r.status);
       mainBytes = new Uint8Array(await r.arrayBuffer());
       usingLocal = false;
-      $('src').className = 'ok';
       $('src').textContent = 'main.py fetched from this site: ' + mainBytes.length + ' bytes';
       return true;
     } catch (e) {
       mainBytes = null;
-      $('src').className = 'warn';
       $('src').textContent = 'Could not fetch main.py (' + e.message + '). ' +
         (location.protocol === 'file:'
           ? 'Open this page from a web server instead of a file, or choose the file below.'
           : 'Put main.py next to this page, or choose the file below.');
-      $('local').open = true;
+      document.querySelector('details').open = true;
       return false;
     }
   }
@@ -220,7 +196,6 @@
     if (!f) return;
     mainBytes = new Uint8Array(await f.arrayBuffer());
     usingLocal = true;
-    $('src').className = 'ok';
     $('src').textContent = 'Using local file ' + f.name + ': ' + mainBytes.length + ' bytes';
   });
 
@@ -249,7 +224,7 @@
 
   async function openPort(baud, quiet) {
     await port.open({ baudRate: baud, bufferSize: 1 << 16 });
-    if (quiet) {                            // keep DTR/RTS low so the board is not reset by the open
+    if (quiet) {                            // keep DTR/RTS low so the open does not reset the board
       try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (e) {}
     }
     writer = port.writable.getWriter();
@@ -315,6 +290,13 @@
     throw new Error('the board did not answer at 115200 baud');
   }
 
+  async function softReboot() {             // leave raw REPL, then Ctrl-D: runs main.py from a clean boot
+    await write('\x02');
+    await sleep(200);
+    await write('\x04');
+    await sleep(600);
+  }
+
   async function rawExec(code, timeout) {
     rx = '';
     await writePaced(code);
@@ -344,8 +326,8 @@
   }
 
   // ---- find the board IP over USB -------------------------------------------
-  // The running main.py listens at 921600 baud and answers {"cmd":"get"} with a
-  // status packet that contains "ip" (STA) and "ap_ip" (AP). Port must be open at 921600.
+  // The freshly booted main.py moves to 921600 baud ~5 s after boot and answers
+  // {"cmd":"get"} with a status packet holding "ip" (STA) and "ap_ip" (AP).
   async function probeIp(timeoutMs) {
     var t0 = performance.now(), sta = '', ap = '', m;
     var reSta = /"ip"\s*:\s*"(\d{1,3}(?:\.\d{1,3}){3})"/;
@@ -364,15 +346,28 @@
   function reportIp(found) {
     if (found.sta) {
       saveIp(found.sta);
-      $('ipState').textContent = 'IP saved: ' + found.sta;
-      log('Board IP: ' + found.sta + ' (saved: the WiFi viewer will connect to it directly).');
+      log('Board IP: ' + found.sta + ' (saved: the WiFi viewer connects to it directly).');
+      setStage('IP ' + found.sta, 'live');
     } else if (found.ap) {
       log('The board did not join a router (no STA IP). Its hotspot IP is ' + found.ap +
           ': join the "' + ($('apSsid').value.trim() || 'ESP32-CAM') + '" WiFi, then use that IP.');
       if (!cleanHost($('camIp').value)) saveIp(found.ap);
+      setStage('Hotspot only', 'wait');
     } else {
-      log('Could not read an IP from the board. Type it in step 3 (or press "Find IP over USB" later).');
+      log('Could not read an IP from the board. Type it in step 2.');
+      setStage('IP not found', 'err');
     }
+  }
+
+  // Port is open at 115200 and the board is in raw REPL: restart it cleanly, switch to 921600, read the IP.
+  async function rebootAndProbe(timeoutMs) {
+    log('Restarting the board...');
+    await softReboot();
+    await releasePort();
+    log('Waiting for it to boot and join WiFi (up to ' + Math.round(timeoutMs / 1000) + ' s)...');
+    await sleep(6500);
+    await openPort(921600, true);
+    reportIp(await probeIp(timeoutMs));
   }
 
   async function findIp() {
@@ -381,13 +376,18 @@
     btn.disabled = true;
     $('install').disabled = true;
     $('log').textContent = '';
+    setStage('Looking for IP...', 'wait');
     try {
       port = await navigator.serial.requestPort();
-      await openPort(921600, true);
-      log('Asking the board for its IP (up to 20 s)...');
-      reportIp(await probeIp(20000));
+      await openPort(115200, false);
+      log('Port open. Resetting the board...');
+      await hardReset();
+      log('Waiting for the REPL. If nothing happens, press the board RESET button now.');
+      await enterRaw();
+      await rebootAndProbe(25000);
     } catch (e) {
       log('FAILED: ' + e.message);
+      setStage('Failed', 'err');
     } finally {
       await closePort();
       btn.disabled = false;
@@ -410,7 +410,7 @@
     var apPw = $('apPw').value;
 
     if (apEnable && !apSsid) {
-      log('AP SSID is empty. Either fill it in or uncheck "Enable AP at boot".');
+      log('AP name is empty. Fill it in or untick the hotspot option (Advanced).');
       return;
     }
     if (apEnable && apPw && apPw.length < 8) {
@@ -423,7 +423,7 @@
     $('findIp').disabled = true;
     prog.hidden = false;
     prog.value = 0;
-    $('viewer').classList.remove('good');
+    setStage('Installing...', 'wait');
 
     try {
       port = await navigator.serial.requestPort();
@@ -460,47 +460,35 @@
       // ---- STA credentials -------------------------------------------------
       if (ssid) {
         await writeJson('wifi.json', { ssid: ssid, password: pw });
-        log('WiFi STA "' + ssid + '" saved to wifi.json.');
+        log('WiFi "' + ssid + '" saved to wifi.json.');
       } else {
-        log('No STA credentials given: existing wifi.json (or config.py) kept.');
+        log('No WiFi given: existing wifi.json (or config.py) kept.');
       }
 
       // ---- AP credentials --------------------------------------------------
       if (apEnable) {
         await writeJson('ap.json', { ssid: apSsid, password: apPw });
-        log('AP "' + apSsid + '" saved to ap.json' +
-            (apPw ? '' : ' (open network)') + '.');
+        log('Hotspot "' + apSsid + '" saved to ap.json' + (apPw ? '' : ' (open network)') + '.');
       } else {
-        // Remove ap.json and force AP_AUTO = False at boot so no AP is started.
         await rawExec(
           "try:\n os.remove('ap.json')\nexcept OSError:\n pass\n" +
           "print('ap.json cleared')");
-        log('AP disabled in installer: ap.json removed. ' +
-            'The AP will not start unless you toggle it on the board (or edit AP_AUTO in main.py).');
+        log('Hotspot disabled: ap.json removed.');
       }
 
-      await write('\x02');                  // leave raw REPL
-      await sleep(200);
-      await write('\x04');                  // soft reboot: runs the new main.py
-      await sleep(600);
       prog.value = 100;
-      $('viewer').classList.add('good');
-      log('Done. The board is restarting.');
-
-      // ---- read the board IP over USB (it switches to 921600 baud ~5 s after boot) ----
+      setStage('Reading IP...', 'wait');
       try {
-        await releasePort();
-        log('Looking for the board IP over USB' + (ssid ? ' (up to 25 s)' : '') + '...');
-        await sleep(6500);
-        await openPort(921600, true);
-        reportIp(await probeIp(ssid ? 25000 : 12000));
+        await rebootAndProbe(ssid ? 25000 : 12000);
       } catch (e2) {
-        log('Could not read the IP over USB (' + e2.message + '). Type it in step 3 instead.');
+        log('Installed, but could not read the IP over USB (' + e2.message + '). Type it in step 2.');
+        setStage('Installed', 'live');
       }
     } catch (e) {
       log('FAILED: ' + e.message);
       log('If the camera script is already running: open the USB viewer, press "Exit to REPL", then try again. ' +
           'Or press the board RESET button right after pressing Install.');
+      setStage('Failed', 'err');
     } finally {
       await closePort();
       btn.disabled = false;
