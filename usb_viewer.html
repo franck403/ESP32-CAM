@@ -185,6 +185,7 @@ function renderBrickognizeResults(data) {
   var html = '<b>BrickLink API Matches:</b><ul>';
   for (var i = 0; i < items.length; i++) {
     var item = items[i];
+    console.log(item)
     var name = item.name || (item.item && item.item.name) || 'Unknown Part';
     var no = item.no || (item.item && item.item.no) || item.id || (item.external_ids && item.external_ids.BrickLink && item.external_ids.BrickLink[0]) || '';
     var score = item.score ? Math.round(item.score * 100) : 0;
@@ -194,19 +195,6 @@ function renderBrickognizeResults(data) {
   html += '</ul>';
   blPanel.innerHTML = html;
 }
-
-    var html = '<b>BrickLink API Matches:</b><ul>';
-    for (var i = 0; i < items.length; i++) {
-      var item = items[i];
-      var name = item.name || (item.item && item.item.name) || 'Unknown Part';
-      var no = item.no || (item.item && item.item.no) || '';
-      var score = item.score ? Math.round(item.score * 100) : 0;
-      var blUrl = no ? 'https://www.bricklink.com/v2/catalog/catalogitem.page?P=' + no : 'https://www.bricklink.com';
-      html += '<li><b>' + name + '</b> (' + no + ') - ' + score + '% - <a href="' + blUrl + '" target="_blank">View on BrickLink &raquo;</a></li>';
-    }
-    html += '</ul>';
-    blPanel.innerHTML = html;
-  }
 
   var lastToastKey = '', lastToastAt = 0;
   function toast(title, msg, kind) {
