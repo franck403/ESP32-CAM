@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ESP32 USB Camera - BrickLink AI</title>
+<title>ESP32 USB Camera - BrickLink API Scan</title>
 <link rel="stylesheet" href="ui.css">
 <style>
   #status{font-size:13px;white-space:normal;max-width:100%;border-radius:10px}
@@ -12,11 +12,10 @@
   .grp{display:flex;gap:8px;align-items:flex-end}
   .grp input[type=number]{width:90px}
   .grp input[type=text],.grp input[type=password]{width:150px}
-  #blPanel{margin-top:10px;background:#1e1e1e;padding:10px;border-radius:8px;font-size:12px;color:#fff;display:none}
+  #blPanel{margin-top:10px;background:#1e1e1e;padding:12px;border-radius:8px;font-size:12px;color:#fff;display:none}
   #blPanel a{color:#4da3ff;text-decoration:none}
+  #blPanel ul{margin:8px 0 0 16px;padding:0}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
 <script>
 (function () {
   function killBadge() {
@@ -72,7 +71,7 @@
       </label>
       <label class="check"><input type="checkbox" id="smooth" checked> Smooth</label>
       <span class="spacer"></span>
-      <button id="aiToggle">BrickLink AI: OFF</button>
+      <button id="scanBtn" class="primary">Scan Snapshot with Brickognize</button>
       <button id="snap">Snapshot</button>
       <button id="full">Fullscreen</button>
     </div>
@@ -148,66 +147,53 @@
   var MAX_JPEG = 2 * 1024 * 1024;
   var textEnc = new TextEncoder(), textDec = new TextDecoder();
 
-  var aiModel = null;
-  var aiEnabled = false;
-  var aiRunning = false;
-  var lastDetections = [];
-
-  $('aiToggle').addEventListener('click', async function () {
-    aiEnabled = !aiEnabled;
-    $('aiToggle').textContent = aiEnabled ? 'BrickLink AI: ON' : 'BrickLink AI: OFF';
-    blPanel.style.display = aiEnabled ? 'block' : 'none';
-    if (aiEnabled && !aiModel) {
-      toast('BrickLink AI', 'Loading recognition model...', 'ok');
+  $('scanBtn').addEventListener('click', function () {
+    canvas.toBlob(async function (blob) {
+      if (!blob) return;
+      blPanel.style.display = 'block';
+      blPanel.innerHTML = 'Scanning snapshot with Brickognize API...';
+      toast('BrickLink Scan', 'Sending snapshot to API...', 'ok');
+      
       try {
-        aiModel = await cocoSsd.load();
-        toast('BrickLink AI', 'Model loaded successfully', 'ok');
+        var formData = new FormData();
+        formData.append('query_image', blob, 'snapshot.jpg');
+
+        var response = await fetch('https://api.brickognize.com/predict/', {
+          method: 'POST',
+          body: formData
+        });
+
+        if (!response.ok) {
+          throw new Error('API error: ' + response.statusText);
+        }
+
+        var data = await response.json();
+        renderBrickognizeResults(data);
       } catch (e) {
-        aiEnabled = false;
-        $('aiToggle').textContent = 'BrickLink AI: OFF';
-        blPanel.style.display = 'none';
-        toast('AI Error', e.message, 'err');
+        blPanel.innerHTML = 'Scan failed: ' + e.message;
+        toast('Scan Error', e.message, 'err');
       }
-    }
+    }, 'image/jpeg', 0.9);
   });
 
-  async function runAI() {
-    if (!aiEnabled || !aiModel || aiRunning || canvas.width === 0 || canvas.height === 0) return;
-    aiRunning = true;
-    try {
-      lastDetections = await aiModel.detect(canvas);
-      updateBrickLinkPanel();
-    } catch (e) {}
-    aiRunning = false;
-  }
-
-  function updateBrickLinkPanel() {
-    if (!lastDetections.length) {
-      blPanel.innerHTML = 'BrickLink AI: No items detected.';
+  function renderBrickognizeResults(data) {
+    var items = data.items || data.predictions || (Array.isArray(data) ? data : []);
+    if (!items.length) {
+      blPanel.innerHTML = '<b>BrickLink API Results:</b> No matching pieces found.';
       return;
     }
-    var html = '<b>BrickLink Matches:</b><ul>';
-    for (var i = 0; i < lastDetections.length; i++) {
-      var item = lastDetections[i];
-      var query = encodeURIComponent(item.class);
-      var blUrl = 'https://www.bricklink.com/v2/catalog/catalogitem.page?q=' + query;
-      html += '<li>' + item.class + ' (' + Math.round(item.score * 100) + '%) - <a href="' + blUrl + '" target="_blank">Search on BrickLink &raquo;</a></li>';
+
+    var html = '<b>BrickLink API Matches:</b><ul>';
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      var name = item.name || (item.item && item.item.name) || 'Unknown Part';
+      var no = item.no || (item.item && item.item.no) || '';
+      var score = item.score ? Math.round(item.score * 100) : 0;
+      var blUrl = no ? 'https://www.bricklink.com/v2/catalog/catalogitem.page?P=' + no : 'https://www.bricklink.com';
+      html += '<li><b>' + name + '</b> (' + no + ') - ' + score + '% - <a href="' + blUrl + '" target="_blank">View on BrickLink &raquo;</a></li>';
     }
     html += '</ul>';
     blPanel.innerHTML = html;
-  }
-
-  function drawDetections() {
-    if (!aiEnabled || !lastDetections.length) return;
-    ctx.strokeStyle = '#ff9900';
-    ctx.lineWidth = 2;
-    ctx.font = '12px sans-serif';
-    ctx.fillStyle = '#ff9900';
-    for (var i = 0; i < lastDetections.length; i++) {
-      var d = lastDetections[i];
-      ctx.strokeRect(d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3]);
-      ctx.fillText(d.class + ' (' + Math.round(d.score * 100) + '%)', d.bbox[0] + 4, d.bbox[1] + 14);
-    }
   }
 
   var lastToastKey = '', lastToastAt = 0;
@@ -424,12 +410,8 @@
           applyView();
         }
         ctx.drawImage(bmp, 0, 0);
-        drawDetections();
         frames++;
         gotFrame = true;
-        if (aiEnabled && aiModel) {
-          runAI();
-        }
       }
       bmp.close();
     }, function (err) {
