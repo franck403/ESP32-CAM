@@ -35,10 +35,11 @@ AP_MAX_CLI  = 3             # max simultaneous AP clients
 STALE_MS    = 100           # encode+send slower than this -> next frame is thrown away, grab a fresh one
 CLIENT_TMO  = 1000          # ms: a client that accepted nothing for this long is dropped (browser reconnects by itself)
 STALE_RECAPTURE = False     # True: after a slow cycle throw a frame away (costs one extra capture wait)
-FB_COUNT    = 3             # camera frame buffers (more = capture overlaps encode/send)
+FB_COUNT    = 2             # camera frame buffers. 3 buffers in WHEN_EMPTY mode = up to 2 old frames queued (seconds of lag when the loop is slower than the sensor)
 EXPOSURE    = None          # None = sensor auto-exposure; int (e.g. 300) locks exposure = steady fps, darker image
 BENCH       = True          # print raw sensor fps + JPEG encode time once at boot
-GRAB_LATEST = False         # False = WHEN_EMPTY: sensor fills the 2nd buffer while we encode (capture overlaps work)
+GRAB_LATEST = True          # True = capture() always returns the NEWEST frame (old queued ones are discarded) -> lowest latency. Needs FB_COUNT >= 2
+TX_POWER    = 19.5          # dBm, max radio power (more range / fewer WiFi retransmits = less stalling). Skipped if the firmware refuses it
 DRAIN_MS    = 60            # after sending a frame, keep pushing its remainder for up to this long
 
 # ===========================================================================
@@ -172,12 +173,26 @@ if BENCH:
 #  Three transports can be used at the same time:
 #    USB (CH340), STA (joined to a router), AP (ESP32 acts as its own AP)
 # ===========================================================================
+def wifi_tune(w):
+    """Max-throughput / min-latency radio settings (802.11b/g/n, no power save, max TX power).
+    Every option is optional: a firmware that does not know one just skips it."""
+    opts = [('pm', getattr(w, 'PM_NONE', None)), ('txpower', TX_POWER)]
+    try:
+        opts.append(('protocol', network.MODE_11B | network.MODE_11G | network.MODE_11N))
+    except Exception:
+        pass
+    for k, v in opts:
+        if v is None:
+            continue
+        try:
+            w.config(**{k: v})
+        except Exception:
+            pass
+
+
 station = network.WLAN(network.STA_IF)
 station.active(True)
-try:
-    station.config(pm=station.PM_NONE)
-except Exception:
-    pass
+wifi_tune(station)
 
 ap = network.WLAN(network.AP_IF)
 
@@ -288,6 +303,7 @@ def ap_start(ssid=None, pw=None):
             ap.config(max_clients=AP_MAX_CLI)
         except Exception:
             pass
+        wifi_tune(ap)
         ap_up = True
         print('AP up: ssid=%s ip=%s' % (ap_ssid, ap.ifconfig()[0]))
         if srv is None:
