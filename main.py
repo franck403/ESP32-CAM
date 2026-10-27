@@ -41,6 +41,10 @@ BENCH       = True          # print raw sensor fps + JPEG encode time once at bo
 GRAB_LATEST = True          # True = capture() always returns the NEWEST frame (old queued ones are discarded) -> lowest latency. Needs FB_COUNT >= 2
 TX_POWER    = 19.5          # dBm, max radio power (more range / fewer WiFi retransmits = less stalling). Skipped if the firmware refuses it
 DRAIN_MS    = 60            # after sending a frame, keep pushing its remainder for up to this long
+AP_TX_POWER = 15.0          # dBm while only the AP is up (STA not joined). The radio power is global on the ESP32; full power + camera on a weak USB port can brown the board out
+STA_TRY_MS  = 15000         # a router join that takes longer is abandoned: a STA scanning for a missing router hops channels and kicks every AP client
+STA_RETRY_MS = 30000        # wait before the next join attempt (x number of failures, max 5 min). Skipped while a client is on the AP
+AP_RETRY_MS = 5000          # wait between AP restart attempts when it cannot come up
 
 # ===========================================================================
 #  Modes
@@ -174,9 +178,10 @@ if BENCH:
 #    USB (CH340), STA (joined to a router), AP (ESP32 acts as its own AP)
 # ===========================================================================
 def wifi_tune(w):
-    """Max-throughput / min-latency radio settings (802.11b/g/n, no power save, max TX power).
-    Every option is optional: a firmware that does not know one just skips it."""
-    opts = [('pm', getattr(w, 'PM_NONE', None)), ('txpower', TX_POWER)]
+    """Low-latency radio settings (802.11b/g/n, no power save).
+    Every option is optional: a firmware that does not know one just skips it.
+    txpower is NOT set here: it is one global radio value, see radio_power()."""
+    opts = [('pm', getattr(w, 'PM_NONE', None))]
     try:
         opts.append(('protocol', network.MODE_11B | network.MODE_11G | network.MODE_11N))
     except Exception:
@@ -191,19 +196,42 @@ def wifi_tune(w):
 
 
 station = network.WLAN(network.STA_IF)
-station.active(True)
-wifi_tune(station)
-
 ap = network.WLAN(network.AP_IF)
 
-wifi_ssid = ''
-wifi_up   = False
-ap_ssid   = AP_SSID_DEF
-ap_pass   = AP_PASS_DEF
-ap_up     = False
-ap_want   = AP_AUTO     # watchdog: restart the AP if it dies while this is True
-srv       = None
-poller    = select.poll()
+wifi_ssid  = ''
+wifi_pass  = ''
+wifi_up    = False
+ap_ssid    = AP_SSID_DEF
+ap_pass    = AP_PASS_DEF
+ap_up      = False
+ap_want    = AP_AUTO    # watchdog: restart the AP if it dies while this is True
+ap_retry_t = 0          # ticks: earliest next AP restart attempt
+sta_want   = False      # a router SSID is configured: keep trying to join it
+sta_busy   = False      # a join attempt is running (the radio hops channels while it lasts)
+sta_t0     = 0          # ticks: start of the running join attempt
+sta_next   = 0          # ticks: earliest next join attempt after a failed one
+sta_fails  = 0
+tx_now     = None
+srv        = None
+poller     = select.poll()
+
+STA_TXT = (('STAT_WRONG_PASSWORD', 'wrong password'), ('STAT_NO_AP_FOUND', 'network not found'),
+           ('STAT_CONNECT_FAIL', 'connect failed'), ('STAT_CONNECTING', 'connecting'),
+           ('STAT_GOT_IP', 'connected'), ('STAT_IDLE', 'idle'))
+
+
+def radio_power():
+    """Full power when the router link is up, a gentler value while only the AP runs."""
+    global tx_now
+    want = TX_POWER if station.isconnected() else AP_TX_POWER
+    if want == tx_now:
+        return
+    try:
+        station.config(txpower=want)
+        tx_now = want
+    except Exception:
+        if station.active():    # firmware refuses it: do not retry every second
+            tx_now = want
 
 
 def load_wifi():
@@ -244,23 +272,90 @@ def save_ap(ssid, pw):
         pass
 
 
-def wifi_connect(ssid, pw):
-    global wifi_ssid
-    if not ssid:
-        return
-    wifi_ssid = ssid
-    try:
-        station.disconnect()
-    except Exception:
-        pass
-    station.connect(ssid, pw)
-
-
 def rssi():
     try:
         return station.status('rssi')
     except Exception:
         return 0
+
+
+def sta_reason():
+    """Short text for the STA state (shown in the viewer and over USB)."""
+    try:
+        st = station.status()
+    except Exception:
+        return ''
+    for name, txt in STA_TXT:
+        if getattr(network, name, None) == st:
+            return txt
+    return str(st)
+
+
+def ap_clients():
+    """Number of stations joined to our AP (-1 = unknown)."""
+    try:
+        return len(ap.status('stations'))
+    except Exception:
+        return -1
+
+
+def net_info():
+    """Network state for /net and the USB status message."""
+    up = station.isconnected()
+    return {
+        'sta_up':    up,
+        'sta_ip':    station.ifconfig()[0] if up else '',
+        'sta_ssid':  wifi_ssid,
+        'sta_state': 'connected' if up else (sta_reason() if sta_want else 'off'),
+        'rssi':      rssi() if up else 0,
+        'ap_up':     ap_up,
+        'ap_ssid':   ap_ssid,
+        'ap_ip':     ap.ifconfig()[0] if ap_up else '',
+        'ap_clients': max(ap_clients(), 0) if ap_up else 0,
+    }
+
+
+def _sta_join():
+    global sta_busy, sta_t0
+    try:
+        station.active(True)
+        station.disconnect()
+    except Exception:
+        pass
+    try:
+        station.connect(wifi_ssid, wifi_pass)
+        sta_busy = True
+        sta_t0 = time.ticks_ms()
+    except Exception as e:
+        print('STA connect failed:', e)
+        sta_busy = False
+
+
+def _sta_giveup():
+    """Stop a join attempt that goes nowhere (a STA that keeps scanning for a missing
+    router hops channels and drops every client of the AP). Retried later."""
+    global sta_busy, sta_next, sta_fails
+    why = sta_reason()
+    try:
+        station.disconnect()
+    except Exception:
+        pass
+    sta_busy = False
+    sta_fails += 1
+    delay = min(STA_RETRY_MS * sta_fails, 300000)
+    sta_next = time.ticks_add(time.ticks_ms(), delay)
+    print('STA: could not join "%s" (%s), next try in %d s' % (wifi_ssid, why or 'no answer', delay // 1000))
+
+
+def wifi_connect(ssid, pw):
+    global wifi_ssid, wifi_pass, sta_want, sta_fails
+    if not ssid:
+        return
+    wifi_ssid = ssid
+    wifi_pass = pw or ''
+    sta_want = True
+    sta_fails = 0
+    _sta_join()
 
 
 def start_server():
@@ -276,46 +371,70 @@ def start_server():
     srv = s
 
 
+def ap_clean(ssid, pw):
+    """Credentials the radio accepts: SSID 1..32 bytes, password empty (open) or 8..63 chars."""
+    ssid = str(ssid or '').strip() or AP_SSID_DEF
+    try:
+        while len(ssid.encode()) > 32:
+            ssid = ssid[:-1]
+    except Exception:
+        ssid = AP_SSID_DEF
+    pw = str(pw or '')[:63]
+    if 0 < len(pw) < 8:
+        print('AP password is shorter than 8 characters: starting an OPEN hotspot')
+        pw = ''
+    return ssid, pw
+
+
 def ap_start(ssid=None, pw=None):
-    """Bring up the ESP32 soft-AP. Runs alongside STA (same channel)."""
+    """Bring up the ESP32 soft-AP (runs next to the STA). Retries, never raises."""
     global ap_up, ap_ssid, ap_pass, ap_want
     if ssid:
         ap_ssid = ssid
     if pw is not None:
         ap_pass = pw
+    ap_ssid, ap_pass = ap_clean(ap_ssid, ap_pass)
     ap_want = True
-    try:
-        gc.collect()
-        ap.active(True)
-        cfg = {'essid': ap_ssid}
-        if len(ap_pass) >= 8:
-            cfg['password'] = ap_pass
-            cfg['authmode'] = network.AUTH_WPA_WPA2_PSK
-        else:
-            cfg['authmode'] = network.AUTH_OPEN
-        ap.config(**cfg)
-        # optional settings: not every firmware build knows them, never let them kill the AP
+    for attempt in range(3):
         try:
-            ap.config(channel=AP_CHANNEL)
-        except Exception:
-            pass
-        try:
-            ap.config(max_clients=AP_MAX_CLI)
-        except Exception:
-            pass
-        wifi_tune(ap)
-        ap_up = True
-        print('AP up: ssid=%s ip=%s' % (ap_ssid, ap.ifconfig()[0]))
-        if srv is None:
+            gc.collect()
+            ap.active(True)
+            cfg = {'essid': ap_ssid}
+            if ap_pass:
+                cfg['password'] = ap_pass
+                cfg['authmode'] = network.AUTH_WPA2_PSK
+            else:
+                cfg['authmode'] = network.AUTH_OPEN
+            ap.config(**cfg)
+            # optional settings: not every firmware build knows them, never let them kill the AP.
+            # The channel is only ours to pick while the STA is not on a router (it follows the router otherwise).
+            if not station.isconnected():
+                try:
+                    ap.config(channel=AP_CHANNEL)
+                except Exception:
+                    pass
             try:
-                start_server()
-            except OSError as e:
-                print('server start failed:', e)
-        return True
-    except Exception as e:
-        print('AP start failed:', e)
-        ap_up = False
-        return False
+                ap.config(max_clients=AP_MAX_CLI)
+            except Exception:
+                pass
+            wifi_tune(ap)
+            ap_up = True
+            print('AP up: ssid=%s ip=%s' % (ap_ssid, ap.ifconfig()[0]))
+            if srv is None:
+                try:
+                    start_server()
+                except OSError as e:
+                    print('server start failed:', e)
+            return True
+        except Exception as e:
+            print('AP start failed (try %d/3): %s' % (attempt + 1, e))
+            try:
+                ap.active(False)
+            except Exception:
+                pass
+            time.sleep_ms(300)
+    ap_up = False
+    return False
 
 
 def ap_stop():
@@ -330,21 +449,41 @@ def ap_stop():
 
 
 def wifi_check():
-    global wifi_up, ap_up
+    """Called about once a second from the main loop."""
+    global wifi_up, ap_up, sta_busy, sta_t0, sta_fails, ap_retry_t
+    now = time.ticks_ms()
+
+    # ---- STA: never let a failing join scan forever ----
     up = station.isconnected()
-    if up and not wifi_up:
-        print('WiFi STA: http://%s' % station.ifconfig()[0])
+    if up:
+        if not wifi_up:
+            print('WiFi STA: http://%s' % station.ifconfig()[0])
+        sta_busy = False
+        sta_fails = 0
+    elif wifi_up:
+        # link lost: the driver retries by itself, give it the same time limit as a first join
+        print('WiFi STA lost')
+        sta_busy = True
+        sta_t0 = now
+    elif sta_want:
+        if sta_busy:
+            if time.ticks_diff(now, sta_t0) > STA_TRY_MS:
+                _sta_giveup()
+        elif time.ticks_diff(now, sta_next) >= 0 and ap_clients() <= 0:
+            print('STA: trying "%s" again' % wifi_ssid)
+            _sta_join()
     wifi_up = up
 
+    # ---- AP watchdog: it died by itself -> bring it back (with a pause between tries) ----
     try:
         now_ap = ap.active()
     except Exception:
         now_ap = False
 
-    # watchdog: AP died by itself -> bring it back
-    if ap_want and not now_ap:
-        print('AP died, restarting')
-        ap_start()
+    if ap_want and not now_ap and time.ticks_diff(now, ap_retry_t) >= 0:
+        print('AP is down, restarting it')
+        ok = ap_start()
+        ap_retry_t = time.ticks_add(time.ticks_ms(), 2000 if ok else AP_RETRY_MS)
         try:
             now_ap = ap.active()
         except Exception:
@@ -355,6 +494,8 @@ def wifi_check():
         if ap_up:
             print('AP: http://%s' % ap.ifconfig()[0])
 
+    radio_power()
+
     if (up or ap_up) and srv is None:
         try:
             start_server()
@@ -362,15 +503,20 @@ def wifi_check():
             print('server start failed:', e)
 
 
+# AP first, STA second: configuring the AP while the STA is mid-join is what made it fall over.
+load_ap()
+if AP_AUTO:
+    ap_start()
+
+station.active(True)
+wifi_tune(station)
+radio_power()
+
 _s, _p = load_wifi()
 try:
     wifi_connect(_s, _p)
 except Exception as _e:
     print('STA connect failed:', _e)
-
-load_ap()
-if AP_AUTO:
-    ap_start()
 
 # ===========================================================================
 #  Viper kernels
@@ -1260,7 +1406,7 @@ def usb_send_msg(obj):
 
 
 def usb_send_status():
-    up = station.isconnected()
+    n = net_info()
     usb_send_msg({
         't': 'status',
         'mode': current_name,
@@ -1272,12 +1418,14 @@ def usb_send_status():
         'jpeg': HAVE_JPEG,
         'baud': BAUD if uart is not None else 115200,
         'ssid': wifi_ssid,
-        'wifi': up,
-        'ip': station.ifconfig()[0] if up else '',
-        'rssi': rssi() if up else 0,
+        'wifi': n['sta_up'],
+        'ip': n['sta_ip'],
+        'rssi': n['rssi'],
+        'sta_state': n['sta_state'],
         'ap': ap_up,
         'ap_ssid': ap_ssid,
-        'ap_ip': ap.ifconfig()[0] if ap_up else '',
+        'ap_ip': n['ap_ip'],
+        'ap_clients': n['ap_clients'],
     })
 
 
@@ -1318,8 +1466,9 @@ def handle_cmd(c):
     elif cmd == 'ap':
         if c.get('on'):
             s = c.get('ssid') or ap_ssid
-            p = c.get('password') if 'password' in c else ap_pass
-            save_ap(s, p or '')
+            p = (c.get('password') or '') if 'password' in c else ap_pass
+            s, p = ap_clean(s, p)
+            save_ap(s, p)
             ap_start(s, p)
         else:
             ap_stop()
@@ -1485,16 +1634,7 @@ def handle_new(c):
         except OSError:
             pass
     elif b'GET /net' in req:
-        up = station.isconnected()
-        info = json.dumps({
-            'sta_up':   up,
-            'sta_ip':   station.ifconfig()[0] if up else '',
-            'sta_ssid': wifi_ssid,
-            'rssi':     rssi() if up else 0,
-            'ap_up':    ap_up,
-            'ap_ssid':  ap_ssid,
-            'ap_ip':    ap.ifconfig()[0] if ap_up else '',
-        }).encode()
+        info = json.dumps(net_info()).encode()
         try:
             c.settimeout(3.0)
             c.sendall(
