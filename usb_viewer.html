@@ -3,18 +3,17 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ESP32 USB Camera - BrickLink API Scan</title>
+<title>ESP32 USB Camera</title>
 <link rel="stylesheet" href="ui.css">
 <style>
+  .grid2{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(300px,1fr);gap:16px;align-items:start}
+  @media (max-width:920px){.grid2{grid-template-columns:1fr}}
   #status{font-size:13px;white-space:normal;max-width:100%;border-radius:10px}
   #board{color:#8fd19e;line-height:1.6;font-size:13px}
   .settings-grid{display:flex;flex-wrap:wrap;gap:12px 22px;align-items:flex-end}
   .grp{display:flex;gap:8px;align-items:flex-end}
   .grp input[type=number]{width:90px}
   .grp input[type=text],.grp input[type=password]{width:150px}
-  #blPanel{margin-top:10px;background:#1e1e1e;padding:12px;border-radius:8px;font-size:12px;color:#fff;display:none}
-  #blPanel a{color:#4da3ff;text-decoration:none}
-  #blPanel ul{margin:8px 0 0 16px;padding:0}
 </style>
 <script>
 (function () {
@@ -56,26 +55,30 @@
     <span id="status" class="chip">Not connected</span>
   </div>
 
-  <section class="card flush">
-    <div class="stage" id="stage"><canvas id="c" width="320" height="240"></canvas></div>
-    <div id="blPanel"></div>
-    <div class="toolbar">
-      <label class="check">Scale
-        <select id="scale">
-          <option value="fit">Fit</option>
-          <option value="1">1x</option>
-          <option value="2">2x</option>
-          <option value="3">3x</option>
-          <option value="4">4x</option>
-        </select>
-      </label>
-      <label class="check"><input type="checkbox" id="smooth" checked> Smooth</label>
-      <span class="spacer"></span>
-      <button id="scanBtn" class="primary">Scan Snapshot with Brickognize</button>
-      <button id="snap">Snapshot</button>
-      <button id="full">Fullscreen</button>
-    </div>
-  </section>
+  <div class="grid2">
+    <!-- ============ stream ============ -->
+    <section class="card flush">
+      <div class="stage" id="stage"><canvas id="c" width="320" height="240"></canvas></div>
+      <div class="toolbar">
+        <label class="check">Scale
+          <select id="scale">
+            <option value="fit">Fit</option>
+            <option value="1">1x</option>
+            <option value="2">2x</option>
+            <option value="3">3x</option>
+            <option value="4">4x</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="smooth" checked> Smooth</label>
+        <span class="spacer"></span>
+        <button id="snap">Snapshot</button>
+        <button id="full">Fullscreen</button>
+      </div>
+    </section>
+
+    <!-- ============ AI (shared panel, see ai.js) ============ -->
+    <section class="card" id="aiMount"></section>
+  </div>
 
   <details id="settings" class="card" style="gap:0">
     <summary>Board settings (WiFi stream and USB)</summary>
@@ -128,6 +131,7 @@
   </details>
 </div>
 <div id="toasts"></div>
+<script src="ai.js"></script>
 <script>
 (function () {
   'use strict';
@@ -139,62 +143,12 @@
   var statusEl = $('status');
   var boardEl  = $('board');
   var toastsEl = $('toasts');
-  var blPanel  = $('blPanel');
   var btnConnect = $('connect'), btnDisconnect = $('disconnect');
   var baudEl = $('baud'), scaleEl = $('scale'), smoothEl = $('smooth');
   var settingBtns = ['a_mode', 'a_q', 'a_usbq', 'a_wifi', 'a_repl', 'a_reboot'];
 
   var MAX_JPEG = 2 * 1024 * 1024;
   var textEnc = new TextEncoder(), textDec = new TextDecoder();
-
-  $('scanBtn').addEventListener('click', function () {
-    canvas.toBlob(async function (blob) {
-      if (!blob) return;
-      blPanel.style.display = 'block';
-      blPanel.innerHTML = 'Scanning snapshot with Brickognize API...';
-      toast('BrickLink Scan', 'Sending snapshot to API...', 'ok');
-      
-      try {
-        var formData = new FormData();
-        formData.append('query_image', blob, 'snapshot.jpg');
-
-        var response = await fetch('https://api.brickognize.com/predict/', {
-          method: 'POST',
-          body: formData
-        });
-
-        if (!response.ok) {
-          throw new Error('API error: ' + response.statusText);
-        }
-
-        var data = await response.json();
-        renderBrickognizeResults(data);
-      } catch (e) {
-        blPanel.innerHTML = 'Scan failed: ' + e.message;
-        toast('Scan Error', e.message, 'err');
-      }
-    }, 'image/jpeg', 0.9);
-  });
-function renderBrickognizeResults(data) {
-  var items = data.items || data.predictions || (Array.isArray(data) ? data : []);
-  if (!items.length) {
-    blPanel.innerHTML = '<b>BrickLink API Results:</b> No matching pieces found.';
-    return;
-  }
-
-  var html = '<b>BrickLink API Matches:</b><ul>';
-  for (var i = 0; i < items.length; i++) {
-    var item = items[i];
-    console.log(item)
-    var name = item.name || (item.item && item.item.name) || 'Unknown Part';
-    var no = item.no || (item.item && item.item.no) || item.id || (item.external_ids && item.external_ids.BrickLink && item.external_ids.BrickLink[0]) || '';
-    var score = item.score ? Math.round(item.score * 100) : 0;
-    var blUrl = no ? 'https://www.bricklink.com/v2/catalog/catalogitem.page?P=' + encodeURIComponent(no) : 'https://www.bricklink.com';
-    html += '<li><b>' + name + '</b> (' + (no || 'N/A') + ') - ' + score + '% - <a href="' + blUrl + '" target="_blank">View on BrickLink &raquo;</a></li>';
-  }
-  html += '</ul>';
-  blPanel.innerHTML = html;
-}
 
   var lastToastKey = '', lastToastAt = 0;
   function toast(title, msg, kind) {
@@ -284,11 +238,14 @@ function renderBrickognizeResults(data) {
     if (m.t === 'status') {
       var wifi = m.wifi
         ? ('WiFi ' + m.ssid + '  http://' + m.ip + '  ' + m.rssi + ' dBm')
-        : ('WiFi not connected' + (m.ssid ? ' (' + m.ssid + ')' : ' (no network saved)'));
+        : ('WiFi not connected' + (m.ssid ? ' (' + m.ssid + (m.sta_state ? ': ' + m.sta_state : '') + ')' : ' (no network saved)'));
+      var hot = m.ap
+        ? ('  |  Hotspot ' + m.ap_ssid + '  http://' + m.ap_ip + (m.ap_clients ? '  (' + m.ap_clients + ' connected)' : ''))
+        : '  |  Hotspot off';
       boardEl.textContent =
         'Mode: ' + m.mode + (m.locked ? ' (set from USB)' : ' (follows WiFi page)') +
         '  |  WiFi JPEG: ' + (m.q === 'auto' ? 'auto' : 'fixed') + ', now ' + m.qlevel +
-        '  |  USB JPEG ' + m.usbq + '  |  ' + wifi + '  |  link ' + m.baud + ' baud' +
+        '  |  USB JPEG ' + m.usbq + '  |  ' + wifi + hot + '  |  link ' + m.baud + ' baud' +
         (m.jpeg ? '' : '  |  no jpeg module in this firmware');
       if (document.activeElement !== $('s_ssid') && !$('s_ssid').value && m.ssid) $('s_ssid').value = m.ssid;
       if (!m.jpeg && !warnedNoJpeg) {
@@ -311,6 +268,12 @@ function renderBrickognizeResults(data) {
   var lastDataTime = 0, pktCount = 0;
   var seenTexts = Object.create(null);
   var statsSeen = 0;
+
+  /* AI panel (every X seconds / every X frames), shared with the WiFi viewer: see ai.js */
+  var ai = window.CamAI
+    ? window.CamAI.mount($('aiMount'), { getCanvas: function () { return canvas; }, ready: function () { return gotFrame; } })
+    : null;
+  if (!ai) $('aiMount').textContent = 'ai.js could not be loaded: keep it next to this page.';
 
   function setStatus(t) { statusEl.textContent = t; }
 
@@ -339,8 +302,8 @@ function renderBrickognizeResults(data) {
   }
 
   var lastTextToast = 0, textToastStreak = 0, warnedNoise = false;
-  var RE_STATS   = /^[A-Za-z0-9_]+:\s*[\d.]+\s*fps\s*\|\s*cap\s*\d+\s*enc\s*\d+\s*send\s*\d+\s*ms\s*\|\s*\d+\s*B\/frame\s*\|\s*level\s+[\w.]+\s*\|\s*rssi\s*-?\d+\s*dBm\s*$/;
-  var RE_BOOT    = /^(USB:|WiFi:|Camera init:|Frame:|Switching mode|Now:|Adopting real frame:|Stopped|Board )/;
+  var RE_STATS   = /^[A-Za-z0-9_]+:\s*[\d.]+\s*fps\s*\|\s*cap\s*\d+\s*enc\s*\d+\s*send\s*\d+\s*ms\s*\|\s*\d+\s*B\/frame\s*\|\s*(?:drop\s*\d+\s*\|\s*cli\s*\d+\s*\|\s*)?level\s+[\w.]+\s*\|\s*rssi\s*-?\d+\s*dBm\s*$/;
+  var RE_BOOT    = /^(USB:|WiFi:|AP|STA:|Camera init:|Frame:|Switching mode|Now:|Adopting real frame:|Stopped|Board )/;
 
   function flushTrash() {
     if (!trashLen) return;
@@ -351,7 +314,7 @@ function renderBrickognizeResults(data) {
       var b = trash[i];
       if (b === 9 || b === 10 || b === 13 || b === 32) { printable++; s += ' '; }
       else if (b >= 33 && b < 127) { printable++; s += String.fromCharCode(b); }
-      else { s += '\u00b7'; }
+      else { s += '·'; }
     }
     if (printable < 4 || printable < n * 0.85) return;
     var txt = s.replace(/\s+/g, ' ').trim();
@@ -368,7 +331,7 @@ function renderBrickognizeResults(data) {
     var dots = 0, alnum = 0, vowels = 0;
     for (var k = 0; k < txt.length; k++) {
       var c = txt.charAt(k);
-      if (c === '\u00b7') dots++;
+      if (c === '·') dots++;
       if (/[A-Za-z0-9]/.test(c)) { alnum++; if (/[aeiouAEIOU]/.test(c)) vowels++; }
     }
     var garbled = (dots > txt.length * 0.10) || (txt.length >= 8 && alnum < txt.length * 0.35) || (alnum >= 12 && vowels === 0);
@@ -412,6 +375,7 @@ function renderBrickognizeResults(data) {
         ctx.drawImage(bmp, 0, 0);
         frames++;
         gotFrame = true;
+        if (ai) ai.frame();               // drives "every X frames"
       }
       bmp.close();
     }, function (err) {
@@ -535,6 +499,7 @@ function renderBrickognizeResults(data) {
   async function disconnect() {
     var wasRunning = running;
     running = false;
+    gotFrame = false;                    // the AI schedule pauses until frames come back
     if (beat) { clearInterval(beat); beat = null; }
     if (wasRunning && writer) {
       try { await writer.write(textEnc.encode(JSON.stringify({ cmd: 'usb', on: false }) + '\n')); } catch (e) {}
